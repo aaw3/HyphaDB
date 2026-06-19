@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 
+	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/sstable"
 	"github.com/aaw3/hyphadb/internal/wal"
@@ -12,10 +13,12 @@ type DB[K comparable, V any] struct {
 	memtable        *memtable.MemTable[K, V]
 	maxMemtableSize int
 	memTableSize    int
-	wal             *wal.WAL[K, V]
-	walPath         string
 	sstables        []*sstable.SSTable[K, V]
 	sstableCounter  int
+	wal             *wal.WAL[K, V]
+	walPath         string
+	manifest        *manifest.Manifest
+	manifestPath    string
 }
 
 func New[K comparable, V any](maxMemtableSize int) (*DB[K, V], error) {
@@ -31,13 +34,26 @@ func New[K comparable, V any](maxMemtableSize int) (*DB[K, V], error) {
 		return nil, err
 	}
 
+	manifestPath := "MANIFEST"
+	mf, err := manifest.Read(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	sstables := make([]*sstable.SSTable[K, V], 0, len(mf.SSTablePaths))
+	for i, path := range mf.SSTablePaths {
+		sstables[i] = &sstable.SSTable[K, V]{Path: path}
+	}
+
 	return &DB[K, V]{
 		memtable:        mt,
 		maxMemtableSize: maxMemtableSize,
 		memTableSize:    len(mt.Entries()),
+		sstables:        sstables,
 		wal:             w,
 		walPath:         walPath,
-		sstables:        make([]*sstable.SSTable[K, V], 0),
+		manifest:        mf,
+		manifestPath:    manifestPath,
 	}, nil
 }
 
@@ -97,6 +113,12 @@ func (db *DB[K, V]) flushMemtable() error {
 
 	db.sstables = append(db.sstables, sst)
 	db.sstableCounter++
+
+	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
+	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		return err
+	}
+
 	db.memtable = memtable.New[K, V]()
 	db.memTableSize = 0
 
