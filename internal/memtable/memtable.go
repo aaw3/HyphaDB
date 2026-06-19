@@ -24,3 +24,11 @@ func (m *MemTable[K, V]) Get(key K) (V, bool) {
 func (m *MemTable[K, V]) Put(key K, value V) {
 	m.data[key] = value
 }
+
+func (m *MemTable[K, V]) Entries() map[K]V {
+	entries := make(map[K]V, len(m.data))
+	for k, v := range m.data {
+		entries[k] = v
+	}
+	return entries
+}
