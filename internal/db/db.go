@@ -59,9 +59,15 @@ func New[K comparable, V any](maxMemtableSize int) (*DB[K, V], error) {
 
 func (db *DB[K, V]) Get(key K) (V, error) {
 	if val, exists := db.memtable.Get(key); exists {
+
+		if any(val).(string) == sstable.TOMBSTONE {
+			var zero V
+			return zero, sstable.ErrNotFound
+		}
 		return val, nil
 	}
 
+	// Check SSTables in reverse order (newest to oldest)
 	for i := len(db.sstables) - 1; i >= 0; i-- {
 		sst := db.sstables[i]
 		val, err := sst.Open(key)
@@ -101,6 +107,15 @@ func (db *DB[K, V]) Put(key K, value V) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (db *DB[K, V]) Delete(key K) error {
+	// write tombstone to WAL and memtable for quick deletion
+	if err := db.Put(key, any(sstable.TOMBSTONE).(V)); err != nil {
+		return err
+	}
+
 	return nil
 }
 
