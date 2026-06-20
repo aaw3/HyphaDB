@@ -2,7 +2,10 @@ package db
 
 import (
 	"fmt"
+	"log"
+	"os"
 
+	"github.com/aaw3/hyphadb/internal/compaction"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/sstable"
@@ -10,18 +13,19 @@ import (
 )
 
 type DB[K comparable, V any] struct {
-	memtable        *memtable.MemTable[K, V]
-	maxMemtableSize int
-	memTableSize    int
-	sstables        []*sstable.SSTable[K, V]
-	sstableCounter  int
-	wal             *wal.WAL[K, V]
-	walPath         string
-	manifest        *manifest.Manifest
-	manifestPath    string
+	memtable            *memtable.MemTable[K, V]
+	maxMemtableSize     int
+	memTableSize        int
+	sstables            []*sstable.SSTable[K, V]
+	sstableCounter      int
+	wal                 *wal.WAL[K, V]
+	walPath             string
+	manifest            *manifest.Manifest
+	manifestPath        string
+	compactionThreshold int
 }
 
-func New[K comparable, V any](maxMemtableSize int) (*DB[K, V], error) {
+func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB[K, V], error) {
 	walPath := "wal.log"
 	mt, err := wal.Replay[K, V](walPath)
 	if err != nil {
@@ -46,15 +50,41 @@ func New[K comparable, V any](maxMemtableSize int) (*DB[K, V], error) {
 	}
 
 	return &DB[K, V]{
-		memtable:        mt,
-		maxMemtableSize: maxMemtableSize,
-		memTableSize:    len(mt.Entries()),
-		sstables:        sstables,
-		wal:             w,
-		walPath:         walPath,
-		manifest:        mf,
-		manifestPath:    manifestPath,
+		memtable:            mt,
+		maxMemtableSize:     maxMemtableSize,
+		memTableSize:        len(mt.Entries()),
+		sstables:            sstables,
+		wal:                 w,
+		walPath:             walPath,
+		manifest:            mf,
+		manifestPath:        manifestPath,
+		compactionThreshold: compactionThreshold,
 	}, nil
+}
+
+func (db *DB[K, V]) Compact() error {
+	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", db.sstableCounter)
+	compactedSSTable, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
+	if err != nil {
+		return err
+	}
+
+	// write compacted SSTable to MANIFEST file
+	db.manifest.SSTablePaths = []string{compactedSSTablePath}
+	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		return err
+	}
+
+	for _, sst := range db.sstables {
+		if err := os.Remove(sst.Path); err != nil {
+			log.Printf("Failed while deleting old SSTable %s: %v", sst.Path, err)
+		}
+	}
+
+	db.sstables = []*sstable.SSTable[K, V]{compactedSSTable}
+	db.sstableCounter++
+
+	return nil
 }
 
 func (db *DB[K, V]) Get(key K) (V, error) {
@@ -136,6 +166,12 @@ func (db *DB[K, V]) flushMemtable() error {
 
 	db.memtable = memtable.New[K, V]()
 	db.memTableSize = 0
+
+	if len(db.sstables) >= db.compactionThreshold {
+		if err := db.Compact(); err != nil {
+			log.Printf("Failed to compact SSTables: %v", err)
+		}
+	}
 
 	return nil
 }
