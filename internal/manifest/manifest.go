@@ -6,14 +6,18 @@ import (
 )
 
 type Manifest struct {
-	SSTablePaths []string
+	NextSSTableID int
+	SSTablePaths  []string
 }
 
 func Read(path string) (*Manifest, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Manifest{SSTablePaths: []string{}}, nil
+			return &Manifest{
+				NextSSTableID: 0,
+				SSTablePaths:  []string{},
+			}, nil
 		}
 		return nil, err
 	}

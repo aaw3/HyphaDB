@@ -18,7 +18,6 @@ type DB struct {
 	maxMemtableSize     int
 	memTableSize        int
 	sstables            []*sstable.SSTable
-	sstableCounter      int
 	wal                 *wal.WAL
 	walPath             string
 	manifest            *manifest.Manifest
@@ -55,7 +54,6 @@ func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB
 		maxMemtableSize:     maxMemtableSize,
 		memTableSize:        len(mt.Entries()),
 		sstables:            sstables,
-		sstableCounter:      len(sstables),
 		wal:                 w,
 		walPath:             walPath,
 		manifest:            mf,
@@ -65,7 +63,9 @@ func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB
 }
 
 func (db *DB) Compact() error {
-	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", db.sstableCounter)
+	id := db.manifest.NextSSTableID
+	db.manifest.NextSSTableID++
+	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
 	compactedSSTable, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
 	if err != nil {
 		return err
@@ -84,7 +84,6 @@ func (db *DB) Compact() error {
 	}
 
 	db.sstables = []*sstable.SSTable{compactedSSTable}
-	db.sstableCounter++
 
 	return nil
 }
@@ -155,14 +154,15 @@ func (db *DB) Delete(key string) error {
 }
 
 func (db *DB) flushMemtable() error {
-	sstablePath := fmt.Sprintf("data-%d.sst", db.sstableCounter)
+	id := db.manifest.NextSSTableID
+	sstablePath := fmt.Sprintf("data-%d.sst", id)
+	db.manifest.NextSSTableID++
 	sst, err := sstable.CreateFromMemTable(db.memtable, sstablePath)
 	if err != nil {
 		return err
 	}
 
 	db.sstables = append(db.sstables, sst)
-	db.sstableCounter++
 
 	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
