@@ -35,10 +35,17 @@ func Write(path string, manifest *Manifest) error {
 		return err
 	}
 
-	if err := file.Close(); err != nil {
+	encoder := gob.NewEncoder(file)
+	if err := encoder.Encode(manifest); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
 		return err
 	}
 
-	// Rename temp file to target path
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
 	return os.Rename(tmpPath, path)
 }

@@ -6,10 +6,11 @@ import (
 	"io"
 	"os"
 
+	"github.com/aaw3/hyphadb/internal/record"
 	"github.com/aaw3/hyphadb/internal/sstable"
 )
 
-func MergeSSTables[K comparable, V any](sstables []*sstable.SSTable[K, V], newPath string) (*sstable.SSTable[K, V], error) {
+func MergeSSTables(sstables []*sstable.SSTable, newPath string) (*sstable.SSTable, error) {
 	// initialize new SSTable file
 	newFile, err := os.Create(newPath)
 
@@ -32,59 +33,62 @@ func MergeSSTables[K comparable, V any](sstables []*sstable.SSTable[K, V], newPa
 		decoders[i] = gob.NewDecoder(files[i])
 	}
 
-	// read first pair from each SSTable
-	pairs := make([]sstable.Pair[K, V], len(sstables))
-	emptySSTables := make([]bool, len(sstables))
-	for i, decoder := range decoders {
-		if err := decoder.Decode(&pairs[i]); err != nil {
-			if err == io.EOF {
-				emptySSTables[i] = true
-				continue
-			}
-			return nil, err
-		}
-	}
-
-	// push pairs onto heap
-	h := &MinHeap[K, V]{}
-	for i, pair := range pairs {
-		if !emptySSTables[i] {
-			heap.Push(h, &HeapItem[K, V]{Pair: pair, SSTableIndex: i})
-		}
-	}
+	// push records onto heap
 
 	// intialize the min-heap
+	h := &MinHeap{}
 	heap.Init(h)
 
-	var lastKey K
+	for i, decoder := range decoders {
+		var rec record.Record
+		err := decoder.Decode(&rec)
+		if err == io.EOF {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		heap.Push(h, &HeapItem{
+			Record:       rec,
+			SSTableIndex: i,
+		})
+	}
+
+	var lastKey string
 	firstKey := true
 
 	for h.Len() > 0 {
 		// pop min pair from heap, write it to new SSTable
-		item := heap.Pop(h).(*HeapItem[K, V])
+		item := heap.Pop(h).(*HeapItem)
 
 		// If duplicate, skip
-		if !firstKey && item.Pair.Key == lastKey {
-
-		} else {
-			if any(item.Pair.Value).(string) != sstable.TOMBSTONE {
-				if err := encoder.Encode(item.Pair); err != nil {
+		if firstKey || item.Record.Key != lastKey {
+			if !item.Record.Deleted {
+				if err := encoder.Encode(item.Record); err != nil {
 					return nil, err
 				}
 			}
-		}
 
-		lastKey = item.Pair.Key
-		firstKey = false
+			lastKey = item.Record.Key
+			firstKey = false
+		}
 
 		// push next pair from same SSTable into heap
-		var nextPair sstable.Pair[K, V]
-		if err := decoders[item.SSTableIndex].Decode(&nextPair); err != nil {
-			heap.Push(h, &HeapItem[K, V]{Pair: nextPair, SSTableIndex: item.SSTableIndex})
-		} else if err == io.EOF {
+		var next record.Record
+		err := decoders[item.SSTableIndex].Decode(&next)
+		if err == io.EOF {
+			continue
+		}
+		if err != nil {
 			return nil, err
 		}
+
+		heap.Push(h, &HeapItem{
+			Record:       next,
+			SSTableIndex: item.SSTableIndex,
+		})
 	}
 
-	return &sstable.SSTable[K, V]{Path: newPath}, nil
+	return &sstable.SSTable{Path: newPath}, nil
 }
