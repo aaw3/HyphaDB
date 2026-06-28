@@ -7,5 +7,6 @@ type Entry struct {
 
 type Record struct {
 	Key string
+	Seq uint64
 	Entry
 }

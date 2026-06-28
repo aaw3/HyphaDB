@@ -27,25 +27,19 @@ func New(path string) (*WAL, error) {
 	}, nil
 }
 
-func (w *WAL) Write(key string, value []byte) error {
-	return w.WriteEntry(key, record.Entry{
-		Value:   value,
-		Deleted: false,
+func (w *WAL) Write(key string, seq uint64, value []byte) error {
+	return w.WriteRecord(record.Record{
+		Key: key,
+		Seq: seq,
+		Entry: record.Entry{
+			Value:   value,
+			Deleted: false,
+		},
 	})
 }
 
-func (w *WAL) WriteEntry(key string, entry record.Entry) error {
-	rec := record.Record{
-		Key:   key,
-		Entry: entry,
-	}
-	return w.encoder.Encode(rec)
-}
-
-func (w *WAL) Delete(key string) error {
-	return w.WriteEntry(key, record.Entry{
-		Deleted: true,
-	})
+func (w *WAL) WriteRecord(record record.Record) error {
+	return w.encoder.Encode(record)
 }
 
 func Replay(path string) (*memtable.MemTable, error) {
@@ -70,7 +64,7 @@ func Replay(path string) (*memtable.MemTable, error) {
 			}
 			return nil, err
 		}
-		mt.Put(record.Key, record.Entry)
+		mt.Put(record)
 	}
 	return mt, nil
 }

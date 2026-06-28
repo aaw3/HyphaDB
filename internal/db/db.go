@@ -23,6 +23,7 @@ type DB struct {
 	manifest            *manifest.Manifest
 	manifestPath        string
 	compactionThreshold int
+	nextSeq             uint64
 }
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
@@ -52,7 +53,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	return &DB{
 		memtable:            mt,
 		maxMemtableSize:     maxMemtableSize,
-		memTableSize:        len(mt.Entries()),
+		memTableSize:        len(mt.Records()),
 		sstables:            sstables,
 		wal:                 w,
 		walPath:             walPath,
@@ -118,17 +119,24 @@ func (db *DB) Get(key string) ([]byte, error) {
 }
 
 func (db *DB) Put(key string, value []byte) error {
-	entry := record.Entry{
-		Value:   value,
-		Deleted: false,
+	seq := db.nextSeq
+	db.nextSeq++
+
+	rec := record.Record{
+		Key: key,
+		Seq: seq,
+		Entry: record.Entry{
+			Value:   value,
+			Deleted: false,
+		},
 	}
 
 	//write to WAL first
-	if err := db.wal.Write(key, value); err != nil {
+	if err := db.wal.WriteRecord(rec); err != nil {
 		return err
 	}
 
-	db.memtable.Put(key, entry)
+	db.memtable.Put(rec)
 	db.memTableSize++
 
 	if db.memTableSize >= db.maxMemtableSize {
@@ -138,12 +146,23 @@ func (db *DB) Put(key string, value []byte) error {
 }
 
 func (db *DB) Delete(key string) error {
+	seq := db.nextSeq
+	db.nextSeq++
+
+	rec := record.Record{
+		Key: key,
+		Seq: seq,
+		Entry: record.Entry{
+			Deleted: true,
+		},
+	}
+
 	// write tombstone to WAL and memtable for quick deletion
-	if err := db.wal.Delete(key); err != nil {
+	if err := db.wal.WriteRecord(rec); err != nil {
 		return err
 	}
 
-	db.memtable.Delete(key)
+	db.memtable.Put(rec)
 	db.memTableSize++
 
 	if db.memTableSize >= db.maxMemtableSize {

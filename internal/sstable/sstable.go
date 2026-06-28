@@ -26,17 +26,11 @@ func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
 	}
 	defer file.Close()
 
-	entries := mt.Entries()
+	memRecords := mt.Records()
 
-	records := make([]record.Record, 0, len(entries))
-	for k, e := range entries {
-		records = append(records, record.Record{
-			Key: k,
-			Entry: record.Entry{
-				Value:   e.Value,
-				Deleted: e.Deleted,
-			},
-		})
+	records := make([]record.Record, 0, len(memRecords))
+	for _, rec := range memRecords {
+		records = append(records, rec)
 	}
 
 	sort.Slice(records, func(i, j int) bool {

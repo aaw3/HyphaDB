@@ -4,37 +4,31 @@ import "github.com/aaw3/hyphadb/internal/record"
 
 type MemTable struct {
 	// Rely on Go's primitive map until we have a functional base system
-	data map[string]record.Entry
+	data map[string]record.Record
 }
 
 func New() *MemTable {
 	return &MemTable{
-		data: make(map[string]record.Entry),
+		data: make(map[string]record.Record),
 	}
 }
 
-func (m *MemTable) Get(key string) (record.Entry, bool) {
-	value, exists := m.data[key]
+func (m *MemTable) Get(key string) (record.Record, bool) {
+	rec, exists := m.data[key]
 	if !exists {
-		return record.Entry{}, false
+		return record.Record{}, false
 	}
-	return value, true
+	return rec, true
 }
 
-func (m *MemTable) Put(key string, value record.Entry) {
-	m.data[key] = value
+func (m *MemTable) Put(rec record.Record) {
+	m.data[rec.Key] = rec
 }
 
-func (m *MemTable) Delete(key string) {
-	m.data[key] = record.Entry{
-		Deleted: true,
-	}
-}
-
-func (m *MemTable) Entries() map[string]record.Entry {
-	entries := make(map[string]record.Entry, len(m.data))
+func (m *MemTable) Records() map[string]record.Record {
+	records := make(map[string]record.Record, len(m.data))
 	for k, v := range m.data {
-		entries[k] = v
+		records[k] = v
 	}
-	return entries
+	return records
 }
