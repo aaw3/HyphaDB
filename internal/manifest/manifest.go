@@ -3,6 +3,9 @@ package manifest
 import (
 	"encoding/gob"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 type Manifest struct {
@@ -29,7 +32,41 @@ func Read(path string) (*Manifest, error) {
 		return nil, err
 	}
 
+	ensureSafeNextSSTableID(&manifest)
+
 	return &manifest, nil
+}
+
+func ensureSafeNextSSTableID(m *Manifest) {
+	maxID := -1
+
+	for _, path := range m.SSTablePaths {
+		id, ok := extractSSTableID(path)
+		if ok && id > maxID {
+			maxID = id
+		}
+	}
+
+	if m.NextSSTableID <= maxID {
+		m.NextSSTableID = maxID + 1
+	}
+}
+
+func extractSSTableID(path string) (int, bool) {
+	base := filepath.Base(path)
+
+	parts := strings.Split(base, "-")
+	if len(parts) != 2 {
+		return 0, false
+	}
+
+	idPart := strings.TrimSuffix(parts[1], ".sst")
+	id, err := strconv.Atoi(idPart)
+	if err != nil {
+		return 0, false
+	}
+
+	return id, true
 }
 
 func Write(path string, manifest *Manifest) error {
