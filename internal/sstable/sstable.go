@@ -81,3 +81,29 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 
 	return nil, ErrNotFound
 }
+
+func (s *SSTable) MaxSeq() (uint64, error) {
+	file, err := os.Open(s.Path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	var maxSeq uint64
+	decoder := gob.NewDecoder(file)
+	for {
+		var rec record.Record
+		if err := decoder.Decode(&rec); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, err
+		}
+
+		if rec.Seq > maxSeq {
+			maxSeq = rec.Seq
+		}
+	}
+
+	return maxSeq, nil
+}

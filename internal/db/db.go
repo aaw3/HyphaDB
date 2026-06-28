@@ -50,6 +50,16 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		sstables = append(sstables, &sstable.SSTable{Path: path})
 	}
 
+	sstableMaxSeq, err := maxSeqFromSSTables(sstables)
+	if err != nil {
+		return nil, err
+	}
+
+	memMaxSeq := maxSeqFromMemTable(mt)
+
+	maxSeq := max(sstableMaxSeq, memMaxSeq)
+	nextSeq := maxSeq + 1
+
 	return &DB{
 		memtable:            mt,
 		maxMemtableSize:     maxMemtableSize,
@@ -60,6 +70,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		manifest:            mf,
 		manifestPath:        manifestPath,
 		compactionThreshold: compactionThreshold,
+		nextSeq:             nextSeq,
 	}, nil
 }
 
@@ -90,13 +101,13 @@ func (db *DB) Compact() error {
 }
 
 func (db *DB) Get(key string) ([]byte, error) {
-	if entry, exists := db.memtable.Get(key); exists {
+	if rec, exists := db.memtable.Get(key); exists {
 
-		if entry.Deleted {
+		if rec.Deleted {
 			return nil, sstable.ErrNotFound
 		}
 
-		return entry.Value, nil
+		return rec.Value, nil
 	}
 
 	// Check SSTables in reverse order (newest to oldest)
@@ -120,7 +131,6 @@ func (db *DB) Get(key string) ([]byte, error) {
 
 func (db *DB) Put(key string, value []byte) error {
 	seq := db.nextSeq
-	db.nextSeq++
 
 	rec := record.Record{
 		Key: key,
@@ -136,6 +146,7 @@ func (db *DB) Put(key string, value []byte) error {
 		return err
 	}
 
+	db.nextSeq++
 	db.memtable.Put(rec)
 	db.memTableSize++
 
@@ -147,7 +158,6 @@ func (db *DB) Put(key string, value []byte) error {
 
 func (db *DB) Delete(key string) error {
 	seq := db.nextSeq
-	db.nextSeq++
 
 	rec := record.Record{
 		Key: key,
@@ -162,6 +172,7 @@ func (db *DB) Delete(key string) error {
 		return err
 	}
 
+	db.nextSeq++
 	db.memtable.Put(rec)
 	db.memTableSize++
 
@@ -198,4 +209,33 @@ func (db *DB) flushMemtable() error {
 	}
 
 	return nil
+}
+
+func maxSeqFromMemTable(mt *memtable.MemTable) uint64 {
+	var maxSeq uint64
+
+	for _, rec := range mt.Records() {
+		if rec.Seq > maxSeq {
+			maxSeq = rec.Seq
+		}
+	}
+
+	return maxSeq
+}
+
+func maxSeqFromSSTables(sstables []*sstable.SSTable) (uint64, error) {
+	var maxSeq uint64
+
+	for _, sst := range sstables {
+		seq, err := sst.MaxSeq()
+		if err != nil {
+			return 0, err
+		}
+
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+
+	return maxSeq, nil
 }
