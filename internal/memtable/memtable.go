@@ -1,32 +1,38 @@
 package memtable
 
-// generic types, should use string for key and []byte for value in the future
-type MemTable[K comparable, V any] struct {
+import "github.com/aaw3/hyphadb/internal/record"
+
+type MemTable struct {
 	// Rely on Go's primitive map until we have a functional base system
-	data map[K]V
+	data map[string]record.Entry
 }
 
-func New[K comparable, V any]() *MemTable[K, V] {
-	return &MemTable[K, V]{
-		data: make(map[K]V),
+func New() *MemTable {
+	return &MemTable{
+		data: make(map[string]record.Entry),
 	}
 }
 
-func (m *MemTable[K, V]) Get(key K) (V, bool) {
+func (m *MemTable) Get(key string) (record.Entry, bool) {
 	value, exists := m.data[key]
-	var zero V
 	if !exists {
-		return zero, false
+		return record.Entry{}, false
 	}
 	return value, true
 }
 
-func (m *MemTable[K, V]) Put(key K, value V) {
+func (m *MemTable) Put(key string, value record.Entry) {
 	m.data[key] = value
 }
 
-func (m *MemTable[K, V]) Entries() map[K]V {
-	entries := make(map[K]V, len(m.data))
+func (m *MemTable) Delete(key string) {
+	m.data[key] = record.Entry{
+		Deleted: true,
+	}
+}
+
+func (m *MemTable) Entries() map[string]record.Entry {
+	entries := make(map[string]record.Entry, len(m.data))
 	for k, v := range m.data {
 		entries[k] = v
 	}

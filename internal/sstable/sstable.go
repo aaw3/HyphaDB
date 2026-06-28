@@ -8,24 +8,18 @@ import (
 	"sort"
 
 	"github.com/aaw3/hyphadb/internal/memtable"
+	"github.com/aaw3/hyphadb/internal/record"
 )
-
-const TOMBSTONE = "__DELETED__"
 
 var ErrNotFound = errors.New("key not found")
 var ErrDeleted = errors.New("key has been deleted")
 
-type Pair[K comparable, V any] struct {
-	Key   K
-	Value V
+type SSTable struct {
+	Path    string
+	Records []record.Record
 }
 
-type SSTable[K comparable, V any] struct {
-	Path  string
-	Pairs []Pair[K, V]
-}
-
-func CreateFromMemTable[K comparable, V any](mt *memtable.MemTable[K, V], path string) (*SSTable[K, V], error) {
+func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return nil, err
@@ -34,62 +28,62 @@ func CreateFromMemTable[K comparable, V any](mt *memtable.MemTable[K, V], path s
 
 	entries := mt.Entries()
 
-	pairs := make([]Pair[K, V], 0, len(entries))
-	for k, v := range entries {
-		pairs = append(pairs, Pair[K, V]{Key: k, Value: v})
+	records := make([]record.Record, 0, len(entries))
+	for k, e := range entries {
+		records = append(records, record.Record{
+			Key: k,
+			Entry: record.Entry{
+				Value:   e.Value,
+				Deleted: e.Deleted,
+			},
+		})
 	}
 
-	sort.Slice(pairs, func(i, j int) bool {
-		return any(pairs[i].Key).(string) < any(pairs[j].Key).(string)
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Key < records[j].Key
 	})
 
 	encoder := gob.NewEncoder(file)
-	for _, pair := range pairs {
-		if err := encoder.Encode(pair); err != nil {
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
 			return nil, err
 		}
 	}
 
-	return &SSTable[K, V]{
-		Path:  path,
-		Pairs: pairs,
+	return &SSTable{
+		Path:    path,
+		Records: records,
 	}, nil
 }
 
-func (s *SSTable[K, V]) Open(key K) (V, error) {
+func (s *SSTable) Open(key string) ([]byte, error) {
 	file, err := os.Open(s.Path)
 	if err != nil {
-		var zero V
-		return zero, err
+		return nil, err
 	}
+	defer file.Close()
 
 	decoder := gob.NewDecoder(file)
 	for {
-		var pair Pair[K, V]
-		if err := decoder.Decode(&pair); err != nil {
+		var record record.Record
+		if err := decoder.Decode(&record); err != nil {
 			if err == io.EOF {
 				break
 			}
-			var zero V
-			return zero, err
+			return nil, err
 		}
 
-		// Assume key is string, this breaks generics
-		keyInDB := any(pair.Key).(string)
-		if keyInDB == any(key).(string) {
-			if any(pair.Value).(string) == TOMBSTONE {
-				var zero V
-				return zero, ErrDeleted
+		if record.Key == key {
+			if record.Entry.Deleted {
+				return nil, ErrDeleted
 			}
-			return pair.Value, nil
+			return record.Entry.Value, nil
 		}
 
-		if keyInDB > any(key).(string) {
-			var zero V
-			return zero, ErrNotFound
+		if record.Key > key {
+			return nil, ErrNotFound
 		}
 	}
 
-	var zero V
-	return zero, ErrNotFound
+	return nil, ErrNotFound
 }

@@ -1,24 +1,22 @@
 package compaction
 
-import (
-	"github.com/aaw3/hyphadb/internal/sstable"
-)
+import "github.com/aaw3/hyphadb/internal/record"
 
-type HeapItem[K comparable, V any] struct {
-	Pair         sstable.Pair[K, V]
+type HeapItem struct {
+	Record       record.Record
 	SSTableIndex int
 }
 
-type MinHeap[K comparable, V any] []*HeapItem[K, V]
+type MinHeap []*HeapItem
 
-func (h MinHeap[K, V]) Len() int {
+func (h MinHeap) Len() int {
 	return len(h)
 }
 
-func (h MinHeap[K, V]) Less(i, j int) bool {
+func (h MinHeap) Less(i, j int) bool {
 	// Compare keys as strings for simplicity
-	keyI := any(h[i].Pair.Key).(string)
-	keyJ := any(h[j].Pair.Key).(string)
+	keyI := any(h[i].Record.Key).(string)
+	keyJ := any(h[j].Record.Key).(string)
 
 	if keyI != keyJ {
 		return keyI < keyJ
@@ -29,15 +27,15 @@ func (h MinHeap[K, V]) Less(i, j int) bool {
 
 }
 
-func (h MinHeap[K, V]) Swap(i, j int) {
+func (h MinHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 }
 
-func (h *MinHeap[K, V]) Push(x any) {
-	*h = append(*h, x.(*HeapItem[K, V]))
+func (h *MinHeap) Push(x any) {
+	*h = append(*h, x.(*HeapItem))
 }
 
-func (h *MinHeap[K, V]) Pop() any {
+func (h *MinHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]

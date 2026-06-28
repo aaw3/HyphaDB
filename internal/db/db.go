@@ -8,32 +8,32 @@ import (
 	"github.com/aaw3/hyphadb/internal/compaction"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
+	"github.com/aaw3/hyphadb/internal/record"
 	"github.com/aaw3/hyphadb/internal/sstable"
 	"github.com/aaw3/hyphadb/internal/wal"
 )
 
-type DB[K comparable, V any] struct {
-	memtable            *memtable.MemTable[K, V]
+type DB struct {
+	memtable            *memtable.MemTable
 	maxMemtableSize     int
 	memTableSize        int
-	sstables            []*sstable.SSTable[K, V]
-	sstableCounter      int
-	wal                 *wal.WAL[K, V]
+	sstables            []*sstable.SSTable
+	wal                 *wal.WAL
 	walPath             string
 	manifest            *manifest.Manifest
 	manifestPath        string
 	compactionThreshold int
 }
 
-func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB[K, V], error) {
+func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	walPath := "wal.log"
-	mt, err := wal.Replay[K, V](walPath)
+	mt, err := wal.Replay(walPath)
 	if err != nil {
 		return nil, err
 	}
 
 	// open WAL for appending
-	w, err := wal.New[K, V](walPath)
+	w, err := wal.New(walPath)
 	if err != nil {
 		return nil, err
 	}
@@ -44,12 +44,12 @@ func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB
 		return nil, err
 	}
 
-	sstables := make([]*sstable.SSTable[K, V], 0, len(mf.SSTablePaths))
-	for i, path := range mf.SSTablePaths {
-		sstables[i] = &sstable.SSTable[K, V]{Path: path}
+	sstables := make([]*sstable.SSTable, 0, len(mf.SSTablePaths))
+	for _, path := range mf.SSTablePaths {
+		sstables = append(sstables, &sstable.SSTable{Path: path})
 	}
 
-	return &DB[K, V]{
+	return &DB{
 		memtable:            mt,
 		maxMemtableSize:     maxMemtableSize,
 		memTableSize:        len(mt.Entries()),
@@ -62,8 +62,10 @@ func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB
 	}, nil
 }
 
-func (db *DB[K, V]) Compact() error {
-	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", db.sstableCounter)
+func (db *DB) Compact() error {
+	id := db.manifest.NextSSTableID
+	db.manifest.NextSSTableID++
+	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
 	compactedSSTable, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
 	if err != nil {
 		return err
@@ -81,90 +83,93 @@ func (db *DB[K, V]) Compact() error {
 		}
 	}
 
-	db.sstables = []*sstable.SSTable[K, V]{compactedSSTable}
-	db.sstableCounter++
+	db.sstables = []*sstable.SSTable{compactedSSTable}
 
 	return nil
 }
 
-func (db *DB[K, V]) Get(key K) (V, error) {
-	if val, exists := db.memtable.Get(key); exists {
+func (db *DB) Get(key string) ([]byte, error) {
+	if entry, exists := db.memtable.Get(key); exists {
 
-		if any(val).(string) == sstable.TOMBSTONE {
-			var zero V
-			return zero, sstable.ErrNotFound
+		if entry.Deleted {
+			return nil, sstable.ErrNotFound
 		}
-		return val, nil
+
+		return entry.Value, nil
 	}
 
 	// Check SSTables in reverse order (newest to oldest)
 	for i := len(db.sstables) - 1; i >= 0; i-- {
-		sst := db.sstables[i]
-		val, err := sst.Open(key)
+		val, err := db.sstables[i].Open(key)
 
 		if err != nil {
-			var zero V
-
-			if err == sstable.ErrDeleted {
-				return zero, sstable.ErrNotFound
-			}
-
-			if err == sstable.ErrNotFound {
+			if err == sstable.ErrDeleted || err == sstable.ErrNotFound {
+				if err == sstable.ErrDeleted {
+					return nil, sstable.ErrNotFound
+				}
 				continue
 			}
-
-			return zero, err
+			return nil, err
 		}
 
 		return val, nil
 	}
-
-	var zero V
-	return zero, sstable.ErrNotFound
+	return nil, sstable.ErrNotFound
 }
 
-func (db *DB[K, V]) Put(key K, value V) error {
+func (db *DB) Put(key string, value []byte) error {
+	entry := record.Entry{
+		Value:   value,
+		Deleted: false,
+	}
+
 	//write to WAL first
 	if err := db.wal.Write(key, value); err != nil {
 		return err
 	}
 
-	db.memtable.Put(key, value)
+	db.memtable.Put(key, entry)
 	db.memTableSize++
 
 	if db.memTableSize >= db.maxMemtableSize {
-		if err := db.flushMemtable(); err != nil {
-			return err
-		}
+		return db.flushMemtable()
 	}
 	return nil
 }
 
-func (db *DB[K, V]) Delete(key K) error {
+func (db *DB) Delete(key string) error {
 	// write tombstone to WAL and memtable for quick deletion
-	if err := db.Put(key, any(sstable.TOMBSTONE).(V)); err != nil {
+	if err := db.wal.Delete(key); err != nil {
 		return err
 	}
 
+	db.memtable.Delete(key)
+	db.memTableSize++
+
+	if db.memTableSize >= db.maxMemtableSize {
+		return db.flushMemtable()
+	}
+
 	return nil
 }
 
-func (db *DB[K, V]) flushMemtable() error {
-	sstablePath := fmt.Sprintf("data-%d.sst", db.sstableCounter)
+func (db *DB) flushMemtable() error {
+	id := db.manifest.NextSSTableID
+	sstablePath := fmt.Sprintf("data-%d.sst", id)
+	db.manifest.NextSSTableID++
 	sst, err := sstable.CreateFromMemTable(db.memtable, sstablePath)
 	if err != nil {
 		return err
 	}
 
 	db.sstables = append(db.sstables, sst)
-	db.sstableCounter++
 
 	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		return err
 	}
 
-	db.memtable = memtable.New[K, V]()
+	db.memtable = memtable.New()
 	db.memTableSize = 0
 
 	if len(db.sstables) >= db.compactionThreshold {
