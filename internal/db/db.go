@@ -25,7 +25,7 @@ type DB struct {
 	compactionThreshold int
 }
 
-func New[K comparable, V any](maxMemtableSize int, compactionThreshold int) (*DB, error) {
+func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	walPath := "wal.log"
 	mt, err := wal.Replay(walPath)
 	if err != nil {
