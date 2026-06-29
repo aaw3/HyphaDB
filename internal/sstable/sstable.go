@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"sort"
 
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -26,20 +25,11 @@ func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
 	}
 	defer file.Close()
 
-	memRecords := mt.Records()
-
-	records := make([]record.Record, 0, len(memRecords))
-	for _, rec := range memRecords {
-		records = append(records, rec)
-	}
-
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].Key < records[j].Key
-	})
+	records := mt.Records()
 
 	encoder := gob.NewEncoder(file)
-	for _, record := range records {
-		if err := encoder.Encode(record); err != nil {
+	for _, rec := range records {
+		if err := encoder.Encode(rec); err != nil {
 			return nil, err
 		}
 	}
