@@ -15,6 +15,7 @@ import (
 
 type DB struct {
 	memtable            *memtable.MemTable
+	immutableMemtable   *memtable.MemTable
 	maxMemtableSize     int
 	memTableSize        int
 	sstables            []*sstable.SSTable
@@ -102,12 +103,21 @@ func (db *DB) Compact() error {
 
 func (db *DB) Get(key string) ([]byte, error) {
 	if rec, exists := db.memtable.Get(key); exists {
-
 		if rec.Deleted {
 			return nil, sstable.ErrNotFound
 		}
 
 		return rec.Value, nil
+	}
+
+	if db.immutableMemtable != nil {
+		if rec, exists := db.immutableMemtable.Get(key); exists {
+			if rec.Deleted {
+				return nil, sstable.ErrNotFound
+			}
+
+			return rec.Value, nil
+		}
 	}
 
 	// Check SSTables in reverse order (newest to oldest)
@@ -151,7 +161,7 @@ func (db *DB) Put(key string, value []byte) error {
 	db.memTableSize++
 
 	if db.memTableSize >= db.maxMemtableSize {
-		return db.flushMemtable()
+		return db.rotateMemtable()
 	}
 	return nil
 }
@@ -177,30 +187,42 @@ func (db *DB) Delete(key string) error {
 	db.memTableSize++
 
 	if db.memTableSize >= db.maxMemtableSize {
-		return db.flushMemtable()
+		return db.rotateMemtable()
 	}
 
 	return nil
 }
 
-func (db *DB) flushMemtable() error {
+func (db *DB) rotateMemtable() error {
+	db.immutableMemtable = db.memtable
+	db.memtable = memtable.New()
+	db.memTableSize = 0
+
+	return db.flushImmutableMemtable()
+}
+
+func (db *DB) flushImmutableMemtable() error {
+	if db.immutableMemtable == nil {
+		return nil
+	}
+
 	id := db.manifest.NextSSTableID
 	sstablePath := fmt.Sprintf("data-%d.sst", id)
 	db.manifest.NextSSTableID++
-	sst, err := sstable.CreateFromMemTable(db.memtable, sstablePath)
+
+	sst, err := sstable.CreateFromMemTable(db.immutableMemtable, sstablePath)
 	if err != nil {
 		return err
 	}
 
 	db.sstables = append(db.sstables, sst)
-
 	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
+
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		return err
 	}
 
-	db.memtable = memtable.New()
-	db.memTableSize = 0
+	db.immutableMemtable = nil
 
 	if len(db.sstables) >= db.compactionThreshold {
 		if err := db.Compact(); err != nil {
