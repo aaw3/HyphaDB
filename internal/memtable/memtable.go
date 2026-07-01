@@ -9,6 +9,11 @@ type MemTable struct {
 	data *skiplist.SkipList
 }
 
+type ImmutableMemTable struct {
+	MemTable *MemTable
+	WalID    int
+}
+
 func New() *MemTable {
 	return &MemTable{
 		data: skiplist.New(),

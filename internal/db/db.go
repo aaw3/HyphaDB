@@ -14,17 +14,16 @@ import (
 )
 
 type DB struct {
-	memtable              *memtable.MemTable
-	immutableMemtable     *memtable.MemTable
-	maxMemtableSize       int
-	memTableSize          int
-	sstables              []*sstable.SSTable
-	wal                   *wal.WAL
-	immutableWALSegmentID int
-	manifest              *manifest.Manifest
-	manifestPath          string
-	compactionThreshold   int
-	nextSeq               uint64
+	memtable            *memtable.MemTable
+	immutableMemtable   *memtable.ImmutableMemTable
+	maxMemtableSize     int
+	memTableSize        int
+	sstables            []*sstable.SSTable
+	wal                 *wal.WAL
+	manifest            *manifest.Manifest
+	manifestPath        string
+	compactionThreshold int
+	nextSeq             uint64
 }
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
@@ -61,16 +60,15 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	nextSeq := maxSeq + 1
 
 	return &DB{
-		memtable:              mt,
-		maxMemtableSize:       maxMemtableSize,
-		memTableSize:          len(mt.Records()),
-		sstables:              sstables,
-		wal:                   w,
-		immutableWALSegmentID: -1,
-		manifest:              mf,
-		manifestPath:          manifestPath,
-		compactionThreshold:   compactionThreshold,
-		nextSeq:               nextSeq,
+		memtable:            mt,
+		maxMemtableSize:     maxMemtableSize,
+		memTableSize:        len(mt.Records()),
+		sstables:            sstables,
+		wal:                 w,
+		manifest:            mf,
+		manifestPath:        manifestPath,
+		compactionThreshold: compactionThreshold,
+		nextSeq:             nextSeq,
 	}, nil
 }
 
@@ -110,7 +108,7 @@ func (db *DB) Get(key string) ([]byte, error) {
 	}
 
 	if db.immutableMemtable != nil {
-		if rec, exists := db.immutableMemtable.Get(key); exists {
+		if rec, exists := db.immutableMemtable.MemTable.Get(key); exists {
 			if rec.Deleted {
 				return nil, sstable.ErrNotFound
 			}
@@ -194,8 +192,10 @@ func (db *DB) Delete(key string) error {
 
 func (db *DB) rotateMemtable() error {
 	oldWAL := db.wal
-	db.immutableMemtable = db.memtable
-	db.immutableWALSegmentID = oldWAL.ID
+	db.immutableMemtable = &memtable.ImmutableMemTable{
+		MemTable: db.memtable,
+		WalID:    oldWAL.ID,
+	}
 
 	db.manifest.NextWALSegmentID++
 
@@ -224,7 +224,7 @@ func (db *DB) flushImmutableMemtable() error {
 	sstablePath := fmt.Sprintf("data-%d.sst", id)
 	db.manifest.NextSSTableID++
 
-	sst, err := sstable.CreateFromMemTable(db.immutableMemtable, sstablePath)
+	sst, err := sstable.CreateFromMemTable(db.immutableMemtable.MemTable, sstablePath)
 	if err != nil {
 		return err
 	}
@@ -233,6 +233,10 @@ func (db *DB) flushImmutableMemtable() error {
 	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		return err
+	}
+
+	if err := wal.RemoveSegment(db.immutableMemtable.WalID); err != nil {
 		return err
 	}
 
