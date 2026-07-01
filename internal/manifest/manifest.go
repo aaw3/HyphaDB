@@ -9,8 +9,9 @@ import (
 )
 
 type Manifest struct {
-	NextSSTableID int
-	SSTablePaths  []string
+	NextSSTableID    int
+	NextWALSegmentID int
+	SSTablePaths     []string
 }
 
 func Read(path string) (*Manifest, error) {
@@ -18,8 +19,9 @@ func Read(path string) (*Manifest, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &Manifest{
-				NextSSTableID: 0,
-				SSTablePaths:  []string{},
+				NextSSTableID:    0,
+				NextWALSegmentID: 0,
+				SSTablePaths:     []string{},
 			}, nil
 		}
 		return nil, err

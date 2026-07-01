@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/gob"
+	"fmt"
 	"io"
 	"os"
 
@@ -10,11 +11,18 @@ import (
 )
 
 type WAL struct {
+	ID      int
 	file    *os.File
+	Path    string
 	encoder *gob.Encoder
 }
 
-func New(path string) (*WAL, error) {
+func SegmentPath(id int) string {
+	return fmt.Sprintf("wal-%d.log", id)
+}
+
+func NewSegment(id int) (*WAL, error) {
+	path := SegmentPath(id)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
 	if err != nil {
@@ -23,8 +31,18 @@ func New(path string) (*WAL, error) {
 
 	return &WAL{
 		file:    file,
+		Path:    path,
 		encoder: gob.NewEncoder(file),
 	}, nil
+}
+
+func RemoveSegment(id int) error {
+	err := os.Remove(SegmentPath(id))
+	// file already deleted
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func (w *WAL) Write(key string, seq uint64, value []byte) error {
@@ -67,4 +85,12 @@ func Replay(path string) (*memtable.MemTable, error) {
 		mt.Put(record)
 	}
 	return mt, nil
+}
+
+func (w *WAL) Close() error {
+	if w.file == nil {
+		return nil
+	}
+
+	return w.file.Close()
 }

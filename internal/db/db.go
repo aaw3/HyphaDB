@@ -14,34 +14,33 @@ import (
 )
 
 type DB struct {
-	memtable            *memtable.MemTable
-	immutableMemtable   *memtable.MemTable
-	maxMemtableSize     int
-	memTableSize        int
-	sstables            []*sstable.SSTable
-	wal                 *wal.WAL
-	walPath             string
-	manifest            *manifest.Manifest
-	manifestPath        string
-	compactionThreshold int
-	nextSeq             uint64
+	memtable              *memtable.MemTable
+	immutableMemtable     *memtable.MemTable
+	maxMemtableSize       int
+	memTableSize          int
+	sstables              []*sstable.SSTable
+	wal                   *wal.WAL
+	immutableWALSegmentID int
+	manifest              *manifest.Manifest
+	manifestPath          string
+	compactionThreshold   int
+	nextSeq               uint64
 }
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
-	walPath := "wal.log"
-	mt, err := wal.Replay(walPath)
+	manifestPath := "MANIFEST"
+	mf, err := manifest.Read(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	mt, err := wal.Replay(wal.SegmentPath(mf.NextWALSegmentID))
 	if err != nil {
 		return nil, err
 	}
 
 	// open WAL for appending
-	w, err := wal.New(walPath)
-	if err != nil {
-		return nil, err
-	}
-
-	manifestPath := "MANIFEST"
-	mf, err := manifest.Read(manifestPath)
+	w, err := wal.NewSegment(mf.NextWALSegmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -62,16 +61,16 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	nextSeq := maxSeq + 1
 
 	return &DB{
-		memtable:            mt,
-		maxMemtableSize:     maxMemtableSize,
-		memTableSize:        len(mt.Records()),
-		sstables:            sstables,
-		wal:                 w,
-		walPath:             walPath,
-		manifest:            mf,
-		manifestPath:        manifestPath,
-		compactionThreshold: compactionThreshold,
-		nextSeq:             nextSeq,
+		memtable:              mt,
+		maxMemtableSize:       maxMemtableSize,
+		memTableSize:          len(mt.Records()),
+		sstables:              sstables,
+		wal:                   w,
+		immutableWALSegmentID: -1,
+		manifest:              mf,
+		manifestPath:          manifestPath,
+		compactionThreshold:   compactionThreshold,
+		nextSeq:               nextSeq,
 	}, nil
 }
 
@@ -194,9 +193,24 @@ func (db *DB) Delete(key string) error {
 }
 
 func (db *DB) rotateMemtable() error {
+	oldWAL := db.wal
 	db.immutableMemtable = db.memtable
+	db.immutableWALSegmentID = oldWAL.ID
+
+	db.manifest.NextWALSegmentID++
+
+	newWAL, err := wal.NewSegment(db.manifest.NextWALSegmentID)
+	if err != nil {
+		return err
+	}
+
 	db.memtable = memtable.New()
 	db.memTableSize = 0
+	db.wal = newWAL
+
+	if err := oldWAL.Close(); err != nil {
+		return err
+	}
 
 	return db.flushImmutableMemtable()
 }
