@@ -1,9 +1,11 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/aaw3/hyphadb/internal/compaction"
 	"github.com/aaw3/hyphadb/internal/manifest"
@@ -15,7 +17,7 @@ import (
 
 type DB struct {
 	memtable            *memtable.MemTable
-	immutableMemtable   *memtable.ImmutableMemTable
+	immutableMemtables  []*memtable.ImmutableMemTable
 	maxMemtableSize     int
 	memTableSize        int
 	sstables            []*sstable.SSTable
@@ -24,7 +26,14 @@ type DB struct {
 	manifestPath        string
 	compactionThreshold int
 	nextSeq             uint64
+
+	mu          sync.Mutex
+	flushSignal chan struct{}
+	closed      bool
+	flushWG     sync.WaitGroup
 }
+
+var ErrClosed = errors.New("database is closed")
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	manifestPath := "MANIFEST"
@@ -33,9 +42,20 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		return nil, err
 	}
 
-	mt, err := wal.Replay(wal.SegmentPath(mf.NextWALSegmentID))
+	mt := memtable.New()
+
+	segments, err := wal.ListSegments()
 	if err != nil {
 		return nil, err
+	}
+
+	// Replay all WAL segments into the memtable
+	// Can cause memory issues if many WAL segments exist
+	// Later recovery should build multiple memtables from WAL segments if they exceed a certain size
+	for _, segment := range segments {
+		if err := wal.ReplayInto(segment.Path, mt); err != nil {
+			return nil, err
+		}
 	}
 
 	// open WAL for appending
@@ -59,7 +79,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	maxSeq := max(sstableMaxSeq, memMaxSeq)
 	nextSeq := maxSeq + 1
 
-	return &DB{
+	database := &DB{
 		memtable:            mt,
 		maxMemtableSize:     maxMemtableSize,
 		memTableSize:        len(mt.Records()),
@@ -69,7 +89,13 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		manifestPath:        manifestPath,
 		compactionThreshold: compactionThreshold,
 		nextSeq:             nextSeq,
-	}, nil
+		flushSignal:         make(chan struct{}, 1),
+	}
+
+	database.flushWG.Add(1)
+	go database.flushLoop()
+
+	return database, nil
 }
 
 func (db *DB) Compact() error {
@@ -99,6 +125,10 @@ func (db *DB) Compact() error {
 }
 
 func (db *DB) Get(key string) ([]byte, error) {
+	// Locks during search, should be replaced with rwmutex and sstable snapshot to allow concurrent reads
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	if rec, exists := db.memtable.Get(key); exists {
 		if rec.Deleted {
 			return nil, sstable.ErrNotFound
@@ -107,8 +137,8 @@ func (db *DB) Get(key string) ([]byte, error) {
 		return rec.Value, nil
 	}
 
-	if db.immutableMemtable != nil {
-		if rec, exists := db.immutableMemtable.MemTable.Get(key); exists {
+	for i := len(db.immutableMemtables) - 1; i >= 0; i-- {
+		if rec, exists := db.immutableMemtables[i].MemTable.Get(key); exists {
 			if rec.Deleted {
 				return nil, sstable.ErrNotFound
 			}
@@ -137,6 +167,13 @@ func (db *DB) Get(key string) ([]byte, error) {
 }
 
 func (db *DB) Put(key string, value []byte) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
 	seq := db.nextSeq
 
 	rec := record.Record{
@@ -164,6 +201,13 @@ func (db *DB) Put(key string, value []byte) error {
 }
 
 func (db *DB) Delete(key string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
 	seq := db.nextSeq
 
 	rec := record.Record{
@@ -192,10 +236,10 @@ func (db *DB) Delete(key string) error {
 
 func (db *DB) rotateMemtable() error {
 	oldWAL := db.wal
-	db.immutableMemtable = &memtable.ImmutableMemTable{
+	db.immutableMemtables = append(db.immutableMemtables, &memtable.ImmutableMemTable{
 		MemTable: db.memtable,
 		WalID:    oldWAL.ID,
-	}
+	})
 
 	db.manifest.NextWALSegmentID++
 
@@ -212,50 +256,121 @@ func (db *DB) rotateMemtable() error {
 		return err
 	}
 
-	return db.flushImmutableMemtable()
+	db.signalFlush()
+	return nil
 }
 
-func (db *DB) flushImmutableMemtable() error {
-	if db.immutableMemtable == nil {
+// send an event to the flushLoop
+func (db *DB) signalFlush() {
+	// non-blocking send to flushSignal channel
+	select {
+	// send 0-length struct as signal
+	case db.flushSignal <- struct{}{}:
+	default:
+		// do nothing on channel full
+	}
+}
+
+func (db *DB) flushLoop() {
+	defer db.flushWG.Done()
+
+	for range db.flushSignal {
+		db.flushUntilEmpty()
+	}
+
+	// run one last flush after the channel closed
+	db.flushUntilEmpty()
+}
+
+func (db *DB) flushUntilEmpty() {
+	for {
+		db.mu.Lock()
+
+		if len(db.immutableMemtables) == 0 {
+			db.mu.Unlock()
+			return
+		}
+
+		// flush oldest immutable memtable
+		imm := db.immutableMemtables[0]
+		db.mu.Unlock()
+
+		if err := db.flushImmutableMemtable(imm); err != nil {
+			log.Printf("Failed to flush immutable memtable: %v", err)
+			return
+		}
+	}
+}
+
+func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
+	if imm == nil {
 		return nil
 	}
 
+	// lock throughout the function to ensure that the sstables and manifest are updated atomically
+
+	db.mu.Lock()
 	id := db.manifest.NextSSTableID
 	sstablePath := fmt.Sprintf("data-%d.sst", id)
 	db.manifest.NextSSTableID++
+	db.mu.Unlock()
 
-	sst, err := sstable.CreateFromMemTable(db.immutableMemtable.MemTable, sstablePath)
+	sst, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
 	if err != nil {
 		return err
 	}
 
+	db.mu.Lock()
 	db.sstables = append(db.sstables, sst)
 	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		db.mu.Unlock()
 		return err
 	}
 
-	if err := wal.RemoveSegment(db.immutableMemtable.WalID); err != nil {
+	if len(db.immutableMemtables) > 0 && db.immutableMemtables[0] == imm {
+		// remove flushed immutable memtable from the list
+		db.immutableMemtables = db.immutableMemtables[1:]
+	}
+
+	shouldCompact := len(db.sstables) >= db.compactionThreshold
+	db.mu.Unlock()
+
+	if err := wal.RemoveSegment(imm.WalID); err != nil {
 		return err
 	}
 
-	db.immutableMemtable = nil
-
-	if len(db.sstables) >= db.compactionThreshold {
+	// Compact synchronously for now since it mutates sstables and manifest.
+	db.mu.Lock()
+	if shouldCompact {
 		if err := db.Compact(); err != nil {
 			log.Printf("Failed to compact SSTables: %v", err)
 		}
 	}
+	db.mu.Unlock()
 
 	return nil
 }
 
-// Close database, currently only needs to close WAL
+// Close database, ensure immutable memtables flush to disk and close active WAL
 func (db *DB) Close() error {
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return nil
+	}
+
+	db.closed = true
+	close(db.flushSignal)
+	db.mu.Unlock()
+
+	db.flushWG.Wait()
+
 	if db.wal != nil {
 		return db.wal.Close()
 	}
+
 	return nil
 }
 

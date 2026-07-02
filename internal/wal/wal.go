@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -15,6 +19,11 @@ type WAL struct {
 	file    *os.File
 	Path    string
 	encoder *gob.Encoder
+}
+
+type Segment struct {
+	ID   int
+	Path string
 }
 
 func SegmentPath(id int) string {
@@ -30,6 +39,7 @@ func NewSegment(id int) (*WAL, error) {
 	}
 
 	return &WAL{
+		ID:      id,
 		file:    file,
 		Path:    path,
 		encoder: gob.NewEncoder(file),
@@ -43,6 +53,50 @@ func RemoveSegment(id int) error {
 		return nil
 	}
 	return err
+}
+
+func ListSegments() ([]Segment, error) {
+	// use glob to find all matching wal segments
+	matches, err := filepath.Glob("wal-*.log")
+	if err != nil {
+		return nil, err
+	}
+
+	segments := make([]Segment, 0, len(matches))
+	for _, path := range matches {
+		id, ok := parseSegmentID(path)
+		if !ok {
+			continue
+		}
+
+		segments = append(segments, Segment{
+			ID:   id,
+			Path: path,
+		})
+	}
+
+	sort.Slice(segments, func(i, j int) bool {
+		return segments[i].ID < segments[j].ID
+	})
+
+	return segments, nil
+}
+
+func parseSegmentID(path string) (int, bool) {
+	base := filepath.Base(path)
+
+	if !strings.HasPrefix(base, "wal-") || !strings.HasSuffix(base, ".log") {
+		return 0, false
+	}
+
+	idPart := strings.TrimSuffix(strings.TrimPrefix(base, "wal-"), ".log")
+
+	id, err := strconv.Atoi(idPart)
+	if err != nil {
+		return 0, false
+	}
+
+	return id, true
 }
 
 func (w *WAL) Write(key string, seq uint64, value []byte) error {
@@ -60,15 +114,14 @@ func (w *WAL) WriteRecord(record record.Record) error {
 	return w.encoder.Encode(record)
 }
 
-func Replay(path string) (*memtable.MemTable, error) {
-	mt := memtable.New()
+func ReplayInto(path string, mt *memtable.MemTable) error {
 	file, err := os.Open(path)
 
 	if err != nil {
 		if os.IsNotExist(err) {
-			return mt, nil
+			return nil
 		}
-		return nil, err
+		return err
 	}
 	defer file.Close()
 
@@ -80,11 +133,11 @@ func Replay(path string) (*memtable.MemTable, error) {
 				// EOF
 				break
 			}
-			return nil, err
+			return err
 		}
 		mt.Put(record)
 	}
-	return mt, nil
+	return nil
 }
 
 func (w *WAL) Close() error {
