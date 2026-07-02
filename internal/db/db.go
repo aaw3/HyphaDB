@@ -251,6 +251,14 @@ func (db *DB) flushImmutableMemtable() error {
 	return nil
 }
 
+// Close database, currently only needs to close WAL
+func (db *DB) Close() error {
+	if db.wal != nil {
+		return db.wal.Close()
+	}
+	return nil
+}
+
 func maxSeqFromMemTable(mt *memtable.MemTable) uint64 {
 	var maxSeq uint64
 
