@@ -15,8 +15,8 @@ func (h MinHeap) Len() int {
 
 func (h MinHeap) Less(i, j int) bool {
 	// Compare keys as strings for simplicity
-	keyI := any(h[i].Record.Key).(string)
-	keyJ := any(h[j].Record.Key).(string)
+	keyI := h[i].Record.Key
+	keyJ := h[j].Record.Key
 
 	if keyI != keyJ {
 		return keyI < keyJ
