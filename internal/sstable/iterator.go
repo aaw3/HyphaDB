@@ -54,14 +54,14 @@ func (it *Iterator) Next() bool {
 	}
 
 	// read the next block from the SSTable file
-	block, err := readBlockFrom(it.file, it.sst.index[it.blockIndex])
+	physical, err := readBlockFrom(it.file, it.sst.index[it.blockIndex])
 	if err != nil {
 		it.err = err
 		return false
 	}
 
-	// decode the block into records
-	records, err := decodeBlock(block)
+	// decode the physical block into records
+	records, err := decodeBlock(physical)
 	if err != nil {
 		it.err = err
 		return false

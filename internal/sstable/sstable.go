@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -45,15 +46,17 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 	defer file.Close()
 
 	var index []IndexEntry
-	var block bytes.Buffer
+	var logicalBlock bytes.Buffer
 	var recordCount int
 	var blockFirstKey string
 
 	// closure to start a new block
 	startBlock := func(firstKey string) {
-		block.Reset()
+		logicalBlock.Reset()
+
 		var countPlaceholder [4]byte
-		block.Write(countPlaceholder[:])
+		logicalBlock.Write(countPlaceholder[:])
+
 		recordCount = 0
 		blockFirstKey = firstKey
 	}
@@ -64,7 +67,13 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 		}
 
 		// write record count at the beginning of the block
-		binary.LittleEndian.PutUint32(block.Bytes()[0:4], uint32(recordCount))
+		binary.LittleEndian.PutUint32(logicalBlock.Bytes()[0:4], uint32(recordCount))
+
+		logical := logicalBlock.Bytes()
+		physical, err := encodePhysicalBlock(logical, CompressionNone)
+		if err != nil {
+			return err
+		}
 
 		// get the current offset in the file
 		offset, err := file.Seek(0, io.SeekCurrent)
@@ -72,19 +81,19 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 			return err
 		}
 
-		// write the block to the file
-		if _, err := file.Write(block.Bytes()); err != nil {
+		// write the physical block to the SSTable file
+		if _, err := file.Write(physical); err != nil {
 			return err
 		}
 
-		// add the block to the index
+		// add the index pointing to the physical block
 		index = append(index, IndexEntry{
 			FirstKey: blockFirstKey,
 			Offset:   uint64(offset),
-			Length:   uint32(block.Len()),
+			Length:   uint32(len(physical)),
 		})
 
-		block.Reset()
+		logicalBlock.Reset()
 		recordCount = 0
 		blockFirstKey = ""
 
@@ -100,14 +109,14 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 		recSize := record.EncodedSize(rec)
 
 		// flush the block if adding this record would exceed the block size
-		if recordCount > 0 && block.Len()+recSize > blockSize {
+		if recordCount > 0 && logicalBlock.Len()+recSize > blockSize {
 			if err := flushBlock(); err != nil {
 				return nil, err
 			}
 			startBlock(rec.Key)
 		}
 
-		if err := record.EncodeBinary(&block, rec); err != nil {
+		if err := record.EncodeBinary(&logicalBlock, rec); err != nil {
 			return nil, err
 		}
 		recordCount++
@@ -163,14 +172,14 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
-	// read the block from the file
-	block, err := s.readBlock(s.index[i])
+	// read the physical block from the file
+	physical, err := s.readBlock(s.index[i])
 	if err != nil {
 		return nil, err
 	}
 
 	// decode the block into records
-	records, err := decodeBlock(block)
+	records, err := decodeBlock(physical)
 	if err != nil {
 		return nil, err
 	}
@@ -259,27 +268,42 @@ func (s *SSTable) readBlock(entry IndexEntry) ([]byte, error) {
 	}
 	defer file.Close()
 
-	if _, err := file.Seek(int64(entry.Offset), io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, entry.Length)
-	if _, err := io.ReadFull(file, buf); err != nil {
-		return nil, err
-	}
-
-	return buf, nil
+	return readBlockFrom(file, entry)
 }
 
 // keep file open for reading blocks, to avoid reopening the file for each block read
 func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
+	maxStoredBlockSize := uint64(maxBlockSize) + uint64(blockHeaderSize) + uint64(blockTrailerSize)
+
+	if entry.Length == 0 {
+		return nil, fmt.Errorf(
+			"%w: block at offset %d has zero length",
+			ErrCorruptSSTable,
+			entry.Offset,
+		)
+	}
+	if uint64(entry.Length) > maxStoredBlockSize {
+		return nil, fmt.Errorf(
+			"%w: block at offset %d has length %d exceeding maximum stored block size %d",
+			ErrCorruptSSTable,
+			entry.Offset,
+			entry.Length,
+			maxStoredBlockSize,
+		)
+	}
+
 	if _, err := file.Seek(int64(entry.Offset), io.SeekStart); err != nil {
 		return nil, err
 	}
 
 	buf := make([]byte, entry.Length)
 	if _, err := io.ReadFull(file, buf); err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"%w: read block at offset %d: %v",
+			ErrCorruptSSTable,
+			entry.Offset,
+			err,
+		)
 	}
 
 	return buf, nil
@@ -396,27 +420,4 @@ func decodeIndex(buf []byte) ([]IndexEntry, error) {
 	}
 
 	return index, nil
-}
-
-func decodeBlock(buf []byte) ([]record.Record, error) {
-	r := bytes.NewReader(buf)
-
-	var countBuf [4]byte
-	if _, err := io.ReadFull(r, countBuf[:]); err != nil {
-		return nil, err
-	}
-
-	count := binary.LittleEndian.Uint32(countBuf[:])
-	records := make([]record.Record, 0, count)
-
-	// decode each record in the block
-	for i := uint32(0); i < count; i++ {
-		rec, err := record.DecodeBinary(r)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, rec)
-	}
-
-	return records, nil
 }

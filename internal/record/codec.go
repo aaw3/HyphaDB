@@ -8,14 +8,23 @@ import (
 
 const (
 	FlagDeleted byte = 1 << 0
-)
 
-func EncodedSize(rec Record) int {
 	// 4 bytes for key length
 	// 4 bytes for value length
 	// 8 bytes for sequence number
 	// 1 byte for flags
-	return 4 + 4 + 8 + 1 + len(rec.Key) + len(rec.Value)
+	HeaderSize = 4 + 4 + 8 + 1
+
+	MaxKeySize   = 1 * 1024 * 1024   // 1MB
+	MaxValueSize = 256 * 1024 * 1024 // 256MB
+)
+
+type remainingReader interface {
+	Len() int
+}
+
+func EncodedSize(rec Record) int {
+	return HeaderSize + len(rec.Key) + len(rec.Value)
 }
 
 func EncodeBinary(w io.Writer, rec Record) error {
@@ -51,7 +60,7 @@ func EncodeBinary(w io.Writer, rec Record) error {
 }
 
 func DecodeBinary(r io.Reader) (Record, error) {
-	var header [17]byte
+	var header [HeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return Record{}, err
 	}
@@ -62,20 +71,43 @@ func DecodeBinary(r io.Reader) (Record, error) {
 	seq := binary.LittleEndian.Uint64(header[8:16])
 	flags := header[16]
 
+	// determine if other flags are set
+	if flags&^FlagDeleted != 0 {
+		return Record{}, fmt.Errorf("unknown record flags: %08b", flags)
+	}
+
+	if keyLen > MaxKeySize {
+		return Record{}, fmt.Errorf("key length %d exceeds maximum allowed size %d", keyLen, MaxKeySize)
+	}
+
+	if valueLen > MaxValueSize {
+		return Record{}, fmt.Errorf("value length %d exceeds maximum allowed size %d", valueLen, MaxValueSize)
+	}
+
+	// bytes.Reader and bytes.Buffer has a Len() method,
+	// use it to validate the payload before allocating k/v buffers
+	if rr, ok := r.(remainingReader); ok {
+		required := uint64(keyLen) + uint64(valueLen)
+		remaining := uint64(rr.Len())
+
+		if required > remaining {
+			return Record{}, fmt.Errorf(
+				"record requires %d payload bytes, but only %d bytes remain",
+				required,
+				remaining,
+			)
+		}
+	}
+
 	// read the key and value from the reader
-	key := make([]byte, keyLen)
+	key := make([]byte, int(keyLen))
 	if _, err := io.ReadFull(r, key); err != nil {
 		return Record{}, err
 	}
 
-	value := make([]byte, valueLen)
+	value := make([]byte, int(valueLen))
 	if _, err := io.ReadFull(r, value); err != nil {
 		return Record{}, err
-	}
-
-	// determine if other flags are set
-	if flags&^FlagDeleted != 0 {
-		return Record{}, fmt.Errorf("unknown record flags: %08b", flags)
 	}
 
 	return Record{

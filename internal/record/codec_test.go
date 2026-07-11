@@ -2,6 +2,7 @@ package record
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -127,4 +128,54 @@ func TestEncodedSizeMatchesWrittenBytes(t *testing.T) {
 	if got, want := buf.Len(), EncodedSize(rec); got != want {
 		t.Errorf("Encoded size mismatch: got %d, want %d", got, want)
 	}
+}
+
+func TestDecodeBinaryRejectsOversizedKey(t *testing.T) {
+	var header [HeaderSize]byte
+
+	binary.LittleEndian.PutUint32(header[0:4], MaxKeySize+1)
+
+	_, err := DecodeBinary(bytes.NewReader(header[:]))
+	if err == nil {
+		t.Fatalf("DecodeBinary did not reject oversized key")
+	}
+
+	if !strings.Contains(err.Error(), "key length") {
+		t.Fatalf("error = %v, want error about key length", err)
+	}
+}
+
+func TestDecodeBinaryRejectsOversizedValue(t *testing.T) {
+	var header [HeaderSize]byte
+
+	binary.LittleEndian.PutUint32(header[4:8], MaxValueSize+1)
+
+	_, err := DecodeBinary(bytes.NewReader(header[:]))
+	if err == nil {
+		t.Fatalf("DecodeBinary did not reject oversized value")
+	}
+
+	if !strings.Contains(err.Error(), "value length") {
+		t.Fatalf("error = %v, want error about value length", err)
+	}
+}
+
+func TestDecodeBinaryRejectsPayloadLargerThanRemainingBytes(t *testing.T) {
+	var header [HeaderSize]byte
+
+	binary.LittleEndian.PutUint32(header[0:4], 10)
+	binary.LittleEndian.PutUint32(header[4:8], 10)
+
+	// 10 payload bytes expected, only write 5 bytes
+	data := append(header[:], []byte("apple")...)
+
+	_, err := DecodeBinary(bytes.NewReader(data))
+	if err == nil {
+		t.Fatal("DecodeBinary did not reject payload larger than remaining bytes")
+	}
+
+	if !strings.Contains(err.Error(), "only 5 bytes remain") {
+		t.Fatalf("error = %v, want remaining-bytes error", err)
+	}
+
 }
