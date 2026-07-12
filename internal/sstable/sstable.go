@@ -19,9 +19,11 @@ var ErrDeleted = errors.New("key has been deleted")
 const (
 	DefaultBlockSize = 64 * 1024 // 64KB
 	footerSize       = 24
+
+	currentFormatVersion = 1
 )
 
-var magic = [8]byte{'H', 'Y', 'P', 'H', 'S', 'S', 'T', '1'}
+var tableMagic = [6]byte{'H', 'Y', 'P', 'S', 'S', 'T'}
 
 type SSTable struct {
 	Path  string
@@ -314,7 +316,10 @@ func writeFooter(w io.Writer, indexOffset uint64, indexLength uint64) error {
 
 	binary.LittleEndian.PutUint64(footer[0:8], indexOffset)
 	binary.LittleEndian.PutUint64(footer[8:16], indexLength)
-	copy(footer[16:], magic[:])
+
+	copy(footer[16:22], tableMagic[:])
+	footer[22] = currentFormatVersion
+	footer[23] = 0 // reserved flags byte
 
 	_, err := w.Write(footer[:])
 	return err
@@ -328,7 +333,9 @@ func readFooter(file *os.File) (uint64, uint64, error) {
 	fileSize := uint64(info.Size())
 
 	if fileSize < footerSize {
-		return 0, 0, errors.New("sstable too small")
+		return 0, 0, fmt.Errorf("%w: SSTable too small",
+			ErrCorruptSSTable,
+		)
 	}
 
 	if _, err := file.Seek(-footerSize, io.SeekEnd); err != nil {
@@ -337,22 +344,60 @@ func readFooter(file *os.File) (uint64, uint64, error) {
 
 	var footer [footerSize]byte
 	if _, err := io.ReadFull(file, footer[:]); err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf(
+			"%w: read footer: %v",
+			ErrCorruptSSTable,
+			err,
+		)
 	}
 
-	if !bytes.Equal(footer[16:], magic[:]) {
-		return 0, 0, errors.New("invalid sstable magic number")
+	if !bytes.Equal(footer[16:22], tableMagic[:]) {
+		return 0, 0, fmt.Errorf(
+			"%w: invalid SSTable magic string",
+			ErrCorruptSSTable,
+		)
+	}
+
+	version := footer[22]
+	if version != currentFormatVersion {
+		return 0, 0, fmt.Errorf(
+			"%w: unsupported SSTable format version: %d",
+			ErrCorruptSSTable,
+			version,
+		)
+	}
+
+	flags := footer[23]
+	if flags != 0 { // reserved for future use, only zero is supported currently
+		return 0, 0, fmt.Errorf(
+			"%w: unsupported sstable footer flags: %#x",
+			ErrCorruptSSTable,
+			flags,
+		)
 	}
 
 	indexOffset := binary.LittleEndian.Uint64(footer[0:8])
 	indexLength := binary.LittleEndian.Uint64(footer[8:16])
 
-	if indexOffset > fileSize-uint64(footerSize) {
-		return 0, 0, errors.New("invalid index offset")
+	dataEnd := fileSize - uint64(footerSize)
+
+	if indexOffset > dataEnd {
+		return 0, 0, fmt.Errorf(
+			"%w: index offset %d exceeds data end %d",
+			ErrCorruptSSTable,
+			indexOffset,
+			dataEnd,
+		)
 	}
 
-	if indexLength > fileSize-uint64(footerSize)-indexOffset {
-		return 0, 0, errors.New("invalid index length")
+	if indexLength > dataEnd-indexOffset {
+		return 0, 0, fmt.Errorf(
+			"%w: index length %d exceeds data end %d minus index offset %d",
+			ErrCorruptSSTable,
+			indexLength,
+			dataEnd,
+			indexOffset,
+		)
 	}
 
 	return indexOffset, indexLength, nil

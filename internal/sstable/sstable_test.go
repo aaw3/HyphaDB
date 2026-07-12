@@ -2,6 +2,8 @@ package sstable
 
 import (
 	"errors"
+	"io"
+	"os"
 	"reflect"
 	"testing"
 
@@ -154,5 +156,97 @@ func TestMaxSeq(t *testing.T) {
 
 	if got != 5 {
 		t.Fatalf("MaxSeq returned wrong value: got %d, want %d", got, 5)
+	}
+}
+
+func TestReadFooterRejectsUnsupportedVersion(t *testing.T) {
+	path := t.TempDir() + "/test_sstable_unsupported_version.sst"
+
+	_, err := CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	}, path, DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords error: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("OpenFile error: %v", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("Stat error: %v", err)
+	}
+
+	versionOffset := info.Size() - int64(footerSize) + 22
+
+	if _, err := file.Seek(versionOffset, io.SeekStart); err != nil {
+		t.Fatalf("Seek error: %v", err)
+	}
+
+	if _, err := file.Write([]byte{99}); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	reopened := &SSTable{Path: path}
+
+	_, err = reopened.Open("apple")
+	if !errors.Is(err, ErrCorruptSSTable) {
+		t.Fatalf("error = %v, want %v",
+			err,
+			ErrCorruptSSTable,
+		)
+	}
+}
+
+func TestReadFooterRejectsNonzeroReservedByte(t *testing.T) {
+	path := t.TempDir() + "/test_sstable_nonzero_reserved_byte.sst"
+
+	_, err := CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	}, path, DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords error: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("OpenFile error: %v", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("Stat error: %v", err)
+	}
+
+	reservedOffset := info.Size() - 1
+
+	if _, err := file.Seek(reservedOffset, io.SeekStart); err != nil {
+		t.Fatalf("Seek error: %v", err)
+	}
+
+	if _, err := file.Write([]byte{1}); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	reopened := &SSTable{Path: path}
+
+	_, err = reopened.Open("apple")
+	if !errors.Is(err, ErrCorruptSSTable) {
+		t.Fatalf("error = %v, want %v",
+			err,
+			ErrCorruptSSTable,
+		)
 	}
 }
