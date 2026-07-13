@@ -1,33 +1,44 @@
 package db
 
 import (
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 )
 
-func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
-	tempDir := t.TempDir()
+func useTempWorkingDirectory(t *testing.T) {
+	t.Helper()
+
 	oldDir, err := os.Getwd()
-
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Getwd error: %v", err)
 	}
-	defer os.Chdir(oldDir)
 
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatal(err)
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("Chdir temp directory failed: %v", err)
 	}
+
+	t.Cleanup(func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Errorf("restore working directory failed: %v", err)
+		}
+	})
+}
+
+func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
+	useTempWorkingDirectory(t)
 
 	database, err := New(2, 10)
 	if err != nil {
 		t.Fatalf("new db: %v", err)
 	}
 
-	if err := database.Put("a", []byte("apple")); err != nil {
-		t.Fatalf("put a: %v", err)
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("put apple: %v", err)
 	}
-	if err := database.Put("b", []byte("banana")); err != nil {
-		t.Fatalf("put b: %v", err)
+	if err := database.Put("banana", []byte("yellow")); err != nil {
+		t.Fatalf("put banana: %v", err)
 	}
 
 	if err := database.Close(); err != nil {
@@ -56,19 +67,212 @@ func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	got, err := reopened.Get("a")
+	got, err := reopened.Get("apple")
 	if err != nil {
-		t.Fatalf("get a after restart: %v", err)
+		t.Fatalf("get apple after restart: %v", err)
 	}
-	if string(got) != "apple" {
-		t.Fatalf("get a = %q, want apple", got)
+	if string(got) != "red" {
+		t.Fatalf("get apple = %q, want red", got)
 	}
 
-	got, err = reopened.Get("b")
+	got, err = reopened.Get("banana")
 	if err != nil {
-		t.Fatalf("get b after restart: %v", err)
+		t.Fatalf("get banana after restart: %v", err)
 	}
-	if string(got) != "banana" {
-		t.Fatalf("get b = %q, want banana", got)
+	if string(got) != "yellow" {
+		t.Fatalf("get banana = %q, want yellow", got)
 	}
+}
+
+func TestConcurrentReadersOfActiveMemtable(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(10_000, 100)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("stable", []byte("value")); err != nil {
+		t.Fatalf("Put error: %v", err)
+	}
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for j := 0; j < 500; j++ {
+				got, err := database.Get("stable")
+				if err != nil {
+					t.Errorf("Get error: %v", err)
+					return
+				}
+
+				if string(got) != "value" {
+					t.Errorf("value = %q, want value", got)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentReadsAndWrites(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(10_000, 100)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("stable", []byte("value")); err != nil {
+		t.Fatalf("initial Put: %v", err)
+	}
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for j := 0; j < 250; j++ {
+				got, err := database.Get("stable")
+				if err != nil {
+					t.Errorf("Get stable: %v", err)
+					return
+				}
+
+				if string(got) != "value" {
+					t.Errorf("stable = %q, want value", got)
+					return
+				}
+			}
+		}()
+	}
+
+	for writer := 0; writer < 4; writer++ {
+		wg.Add(1)
+
+		go func(writer int) {
+			defer wg.Done()
+
+			for j := 0; j < 100; j++ {
+				key := fmt.Sprintf("writer-%d-%d", writer, j)
+
+				if err := database.Put(key, []byte("x")); err != nil {
+					t.Errorf("Put %q: %v", key, err)
+					return
+				}
+			}
+		}(writer)
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentFirstReadsAfterReopen(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(2, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put apple: %v", err)
+	}
+	if err := database.Put("banana", []byte("yellow")); err != nil {
+		t.Fatalf("Put banana: %v", err)
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	reopened, err := New(2, 100)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			got, err := reopened.Get("apple")
+			if err != nil {
+				t.Errorf("Get apple: %v", err)
+				return
+			}
+
+			if string(got) != "red" {
+				t.Errorf("a = %q, want red", got)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestConcurrentGetDuringBackgroundFlush(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(4, 100)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("stable", []byte("value")); err != nil {
+		t.Fatalf("Put stable: %v", err)
+	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 200; i++ {
+			got, err := database.Get("stable")
+			if err != nil {
+				t.Errorf("Get stable: %v", err)
+				return
+			}
+
+			if string(got) != "value" {
+				t.Errorf("stable = %q, want value", got)
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("key-%d", i)
+
+			if err := database.Put(key, []byte("x")); err != nil {
+				t.Errorf("Put %q: %v", key, err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }

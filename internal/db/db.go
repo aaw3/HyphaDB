@@ -27,7 +27,7 @@ type DB struct {
 	compactionThreshold int
 	nextSeq             uint64
 
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	flushSignal chan struct{}
 	closed      bool
 	flushWG     sync.WaitGroup
@@ -99,8 +99,13 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 }
 
 func (db *DB) Compact() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.compactLocked()
+}
+
+func (db *DB) compactLocked() error {
 	id := db.manifest.NextSSTableID
-	db.manifest.NextSSTableID++
 	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
 	compactedSSTable, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
 	if err != nil {
@@ -108,26 +113,51 @@ func (db *DB) Compact() error {
 	}
 
 	// write compacted SSTable to MANIFEST file
+
+	oldPaths := db.manifest.SSTablePaths
+	db.manifest.NextSSTableID++
 	db.manifest.SSTablePaths = []string{compactedSSTablePath}
+
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		// Restore in-memory manifest since persistence failed
+		db.manifest.NextSSTableID--
+		db.manifest.SSTablePaths = oldPaths
+
+		if removeErr := os.Remove(compactedSSTablePath); removeErr != nil &&
+			!os.IsNotExist(removeErr) {
+			log.Printf(
+				"failed to clean up orphaned compacted SStable %s: %v",
+				compactedSSTablePath,
+				removeErr,
+			)
+		}
 		return err
 	}
 
-	for _, sst := range db.sstables {
+	oldTables := db.sstables
+	db.sstables = []*sstable.SSTable{compactedSSTable}
+
+	for _, sst := range oldTables {
 		if err := os.Remove(sst.Path); err != nil {
-			log.Printf("Failed while deleting old SSTable %s: %v", sst.Path, err)
+			log.Printf("failed while deleting old SSTable %s: %v",
+				sst.Path,
+				err,
+			)
 		}
 	}
-
-	db.sstables = []*sstable.SSTable{compactedSSTable}
 
 	return nil
 }
 
 func (db *DB) Get(key string) ([]byte, error) {
-	// Locks during search, should be replaced with rwmutex and sstable snapshot to allow concurrent reads
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	// Holds the read lock during SSTable access so compaction doesn't delete
+	// a table while this lookup is opening / reading it
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, ErrClosed
+	}
 
 	if rec, exists := db.memtable.Get(key); exists {
 		if rec.Deleted {
@@ -150,18 +180,19 @@ func (db *DB) Get(key string) ([]byte, error) {
 	// Check SSTables in reverse order (newest to oldest)
 	for i := len(db.sstables) - 1; i >= 0; i-- {
 		val, err := db.sstables[i].Open(key)
+		switch {
+		case err == nil:
+			return val, nil
 
-		if err != nil {
-			if err == sstable.ErrDeleted || err == sstable.ErrNotFound {
-				if err == sstable.ErrDeleted {
-					return nil, sstable.ErrNotFound
-				}
-				continue
-			}
+		case errors.Is(err, sstable.ErrDeleted):
+			return nil, sstable.ErrNotFound
+
+		case errors.Is(err, sstable.ErrNotFound):
+			continue
+
+		default:
 			return nil, err
 		}
-
-		return val, nil
 	}
 	return nil, sstable.ErrNotFound
 }
@@ -344,7 +375,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	// Compact synchronously for now since it mutates sstables and manifest.
 	db.mu.Lock()
 	if shouldCompact {
-		if err := db.Compact(); err != nil {
+		if err := db.compactLocked(); err != nil {
 			log.Printf("Failed to compact SSTables: %v", err)
 		}
 	}
