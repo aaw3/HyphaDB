@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/aaw3/hyphadb/internal/compression"
@@ -473,5 +474,57 @@ func TestCompressedSSTableCorruptionReturnsErrCorrupt(t *testing.T) {
 			err,
 			ErrCorruptSSTable,
 		)
+	}
+}
+
+func TestConcurrentMissingKeyReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.sst")
+
+	sst, err := CreateFromRecords(
+		[]record.Record{
+			{
+				Key: "banana",
+				Seq: 1,
+				Entry: record.Entry{
+					Value: []byte("yellow"),
+				},
+			},
+		},
+		path,
+		DefaultBlockSize,
+	)
+	if err != nil {
+		t.Fatalf("CreateFromRecords error: %v", err)
+	}
+
+	for _, key := range []string{"a", "z"} {
+		key := key
+
+		t.Run(key, func(t *testing.T) {
+			var wg sync.WaitGroup
+
+			for i := 0; i < 16; i++ {
+				wg.Add(1)
+
+				go func() {
+					defer wg.Done()
+
+					for j := 0; j < 100; j++ {
+						_, err := sst.Open(key)
+						if !errors.Is(err, ErrNotFound) {
+							t.Errorf(
+								"Open(%q) error = %v, want %v",
+								key,
+								err,
+								ErrNotFound,
+							)
+							return
+						}
+					}
+				}()
+			}
+
+			wg.Wait()
+		})
 	}
 }

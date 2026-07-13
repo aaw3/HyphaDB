@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -15,6 +16,7 @@ import (
 
 var ErrNotFound = errors.New("key not found")
 var ErrDeleted = errors.New("key has been deleted")
+var ErrUnsortedRecords = errors.New("records are not sorted")
 
 const (
 	DefaultBlockSize = 64 * 1024 // 64KB
@@ -28,8 +30,10 @@ const (
 var tableMagic = [6]byte{'H', 'Y', 'P', 'S', 'S', 'T'}
 
 type SSTable struct {
-	Path  string
-	index []IndexEntry
+	Path string
+
+	indexMu sync.RWMutex
+	index   []IndexEntry
 }
 
 type IndexEntry struct {
@@ -124,7 +128,16 @@ func CreateFromRecordsWithOptions(
 		return nil
 	}
 
-	for _, rec := range records {
+	for i, rec := range records {
+		if i > 0 && records[i-1].Key > rec.Key {
+			return nil, fmt.Errorf(
+				"%w: key %q appears before %q",
+				ErrUnsortedRecords,
+				records[i-1].Key,
+				rec.Key,
+			)
+		}
+
 		if recordCount == 0 {
 			startBlock(rec.Key)
 		}
@@ -183,7 +196,10 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 		return nil, err
 	}
 
+	s.indexMu.RLock()
+
 	if len(s.index) == 0 {
+		s.indexMu.RUnlock()
 		return nil, ErrNotFound
 	}
 
@@ -193,11 +209,15 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 	}) - 1
 
 	if i < 0 {
+		s.indexMu.RUnlock()
 		return nil, ErrNotFound
 	}
 
+	entry := s.index[i]
+	s.indexMu.RUnlock()
+
 	// read the physical block from the file
-	physical, err := s.readBlock(s.index[i])
+	physical, err := s.readBlock(entry)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +231,7 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 	// search for the key in the records
 	for _, rec := range records {
 		if rec.Key == key {
-			if rec.Entry.Deleted {
+			if rec.Deleted {
 				return nil, ErrDeleted
 			}
 			return rec.Value, nil
@@ -250,6 +270,18 @@ func (s *SSTable) MaxSeq() (uint64, error) {
 }
 
 func (s *SSTable) loadIndex() error {
+	s.indexMu.RLock()
+	loaded := s.index != nil
+	s.indexMu.RUnlock()
+
+	if loaded {
+		return nil
+	}
+
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+
+	// A go routine may have loaded the index while waiting for lock
 	if s.index != nil {
 		return nil
 	}
