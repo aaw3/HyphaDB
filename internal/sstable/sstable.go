@@ -21,6 +21,8 @@ const (
 	footerSize       = 24
 
 	currentFormatVersion = 1
+
+	DefaultMinCompressionSavingsRate = 0.125
 )
 
 var tableMagic = [6]byte{'H', 'Y', 'P', 'S', 'S', 'T'}
@@ -37,10 +39,30 @@ type IndexEntry struct {
 }
 
 func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
-	return CreateFromRecords(mt.Records(), path, DefaultBlockSize)
+	return CreateFromRecordsWithOptions(mt.Records(), path, DefaultWriteOptions())
 }
 
-func CreateFromRecords(records []record.Record, path string, blockSize int) (*SSTable, error) {
+func CreateFromRecords(
+	records []record.Record,
+	path string,
+	blockSize int,
+) (*SSTable, error) {
+	opts := DefaultWriteOptions()
+	opts.BlockSize = blockSize
+
+	return CreateFromRecordsWithOptions(records, path, opts)
+}
+
+func CreateFromRecordsWithOptions(
+	records []record.Record,
+	path string,
+	opts WriteOptions,
+) (*SSTable, error) {
+	opts, err := normalizeWriteOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
 		return nil, err
@@ -72,7 +94,7 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 		binary.LittleEndian.PutUint32(logicalBlock.Bytes()[0:4], uint32(recordCount))
 
 		logical := logicalBlock.Bytes()
-		physical, err := encodePhysicalBlock(logical, CompressionNone)
+		physical, err := encodePhysicalBlock(logical, opts.Compression, opts.MinSavingsRate)
 		if err != nil {
 			return err
 		}
@@ -111,7 +133,7 @@ func CreateFromRecords(records []record.Record, path string, blockSize int) (*SS
 		recSize := record.EncodedSize(rec)
 
 		// flush the block if adding this record would exceed the block size
-		if recordCount > 0 && logicalBlock.Len()+recSize > blockSize {
+		if recordCount > 0 && logicalBlock.Len()+recSize > opts.BlockSize {
 			if err := flushBlock(); err != nil {
 				return nil, err
 			}

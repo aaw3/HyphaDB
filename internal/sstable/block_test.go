@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"math/rand"
 	"reflect"
 	"testing"
 
+	"github.com/aaw3/hyphadb/internal/compression"
 	"github.com/aaw3/hyphadb/internal/record"
 )
 
@@ -72,7 +74,7 @@ func TestPhysicalBlockRoundTrip(t *testing.T) {
 
 	logical := makeLogicalBlock(t, want)
 
-	physical, err := encodePhysicalBlock(logical, CompressionNone)
+	physical, err := encodePhysicalBlock(logical, compression.None, DefaultMinCompressionSavingsRate)
 	if err != nil {
 		t.Fatalf("encodePhysicalBlock failed: %v", err)
 	}
@@ -92,7 +94,7 @@ func TestDecodePhysicalBlockRejectsCorruptPayload(t *testing.T) {
 		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
 	})
 
-	physical, err := encodePhysicalBlock(logical, CompressionNone)
+	physical, err := encodePhysicalBlock(logical, compression.None, DefaultMinCompressionSavingsRate)
 	if err != nil {
 		t.Fatalf("encodePhysicalBlock failed: %v", err)
 	}
@@ -109,7 +111,8 @@ func TestDecodePhysicalBlockRejectsCorruptChecksum(t *testing.T) {
 
 	physical, err := encodePhysicalBlock(
 		logical,
-		CompressionNone,
+		compression.None,
+		DefaultMinCompressionSavingsRate,
 	)
 	if err != nil {
 		t.Fatalf("encodePhysicalBlock failed: %v", err)
@@ -126,7 +129,8 @@ func TestDecodePhysicalBlockRejectsUnknownCodec(t *testing.T) {
 
 	physical, err := encodePhysicalBlock(
 		logical,
-		CompressionNone,
+		compression.None,
+		DefaultMinCompressionSavingsRate,
 	)
 	if err != nil {
 		t.Fatalf("encodePhysicalBlock failed: %v", err)
@@ -144,7 +148,8 @@ func TestDecodePhysicalBlockRejectsRawLengthMismatch(t *testing.T) {
 
 	physical, err := encodePhysicalBlock(
 		logical,
-		CompressionNone,
+		compression.None,
+		DefaultMinCompressionSavingsRate,
 	)
 	if err != nil {
 		t.Fatalf("encodePhysicalBlock failed: %v", err)
@@ -190,4 +195,69 @@ func TestDecodeLogicalBlockRejectsImpossibleRecordCount(t *testing.T) {
 
 	_, err := decodeLogicalBlock(logical[:])
 	requireErrorIs(t, err, ErrCorruptSSTable)
+}
+
+func TestEncodePhysicalBlockUsesLZ4ForCompressibleData(t *testing.T) {
+	logical := bytes.Repeat([]byte("aaaaaaaaaaaaaaaa"), 4096)
+
+	physical, err := encodePhysicalBlock(
+		logical,
+		compression.LZ4,
+		DefaultMinCompressionSavingsRate,
+	)
+	if err != nil {
+		t.Fatalf("encodePhysicalBlock error: %v", err)
+	}
+
+	codec := compression.Type(physical[0])
+	if codec != compression.LZ4 {
+		t.Fatalf("codec = %d, want %d",
+			codec,
+			compression.LZ4,
+		)
+	}
+
+	got, err := decodePhysicalBlock(physical)
+	if err != nil {
+		t.Fatalf("decodePhysicalBlock error: %v", err)
+	}
+
+	if !bytes.Equal(got, logical) {
+		t.Fatal("decoded logical block does not match input")
+	}
+}
+
+func TestEncodePhysicalBlockFallsBackForIncompressibleData(t *testing.T) {
+	logical := make([]byte, 64*1024)
+
+	rng := rand.New(rand.NewSource(1))
+	if _, err := rng.Read(logical); err != nil {
+		t.Fatalf("random data: %v", err)
+	}
+
+	physical, err := encodePhysicalBlock(
+		logical,
+		compression.LZ4,
+		DefaultMinCompressionSavingsRate,
+	)
+	if err != nil {
+		t.Fatalf("encodePhysicalBlock error: %v", err)
+	}
+
+	codec := compression.Type(physical[0])
+	if codec != compression.None {
+		t.Fatalf("codec = %d, want %d",
+			codec,
+			compression.None,
+		)
+	}
+
+	got, err := decodePhysicalBlock(physical)
+	if err != nil {
+		t.Fatalf("decodePhysicalBlock error: %v", err)
+	}
+
+	if !bytes.Equal(got, logical) {
+		t.Fatal("decoded logical block does not match input")
+	}
 }

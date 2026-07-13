@@ -8,13 +8,8 @@ import (
 	"hash/crc32"
 	"io"
 
+	"github.com/aaw3/hyphadb/internal/compression"
 	"github.com/aaw3/hyphadb/internal/record"
-)
-
-type CompressionType byte
-
-const (
-	CompressionNone CompressionType = iota
 )
 
 const (
@@ -30,11 +25,15 @@ var (
 )
 
 type BlockHeader struct {
-	Codec  CompressionType
+	Codec  compression.Type
 	RawLen uint32
 }
 
-func encodePhysicalBlock(logical []byte, compression CompressionType) ([]byte, error) {
+func encodePhysicalBlock(
+	logical []byte,
+	reqCodec compression.Type,
+	minSavingsRate float64,
+) ([]byte, error) {
 	if len(logical) > maxBlockSize {
 		return nil, fmt.Errorf(
 			"%w: block size %d exceeds maximum %d",
@@ -44,23 +43,18 @@ func encodePhysicalBlock(logical []byte, compression CompressionType) ([]byte, e
 		)
 	}
 
-	header := BlockHeader{
-		Codec:  compression,
-		RawLen: uint32(len(logical)),
+	storedPayload, actualCodec, err := compression.Compress(
+		logical,
+		reqCodec,
+		minSavingsRate,
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	var storedPayload []byte
-
-	switch compression {
-	case CompressionNone:
-		storedPayload = logical
-
-	default:
-		return nil, fmt.Errorf(
-			"%w: unknown compression type %d",
-			ErrCorruptSSTable,
-			compression,
-		)
+	header := BlockHeader{
+		Codec:  actualCodec,
+		RawLen: uint32(len(logical)),
 	}
 
 	physicalSize := blockHeaderSize + len(storedPayload) + blockTrailerSize
@@ -71,10 +65,10 @@ func encodePhysicalBlock(logical []byte, compression CompressionType) ([]byte, e
 
 	copy(physical[blockHeaderSize:], storedPayload)
 
-	checksumStart := physicalSize - blockTrailerSize
-	checksum := crc32.Checksum(physical[:checksumStart], crc32cTable)
+	checksumOffset := physicalSize - blockTrailerSize
+	checksum := crc32.Checksum(physical[:checksumOffset], crc32cTable)
 
-	binary.LittleEndian.PutUint32(physical[checksumStart:], checksum)
+	binary.LittleEndian.PutUint32(physical[checksumOffset:], checksum)
 
 	return physical, nil
 }
@@ -99,7 +93,7 @@ func decodePhysicalBlock(physical []byte) ([]byte, error) {
 	}
 
 	header := BlockHeader{
-		Codec:  CompressionType(physical[0]),
+		Codec:  compression.Type(physical[0]),
 		RawLen: binary.LittleEndian.Uint32(physical[1:5]),
 	}
 
@@ -114,25 +108,20 @@ func decodePhysicalBlock(physical []byte) ([]byte, error) {
 
 	storedPayload := physical[blockHeaderSize:checksumOffset]
 
-	switch header.Codec {
-	case CompressionNone:
-		if uint64(header.RawLen) != uint64(len(storedPayload)) {
-			return nil, fmt.Errorf(
-				"%w: raw block length %d does not match payload length %d",
-				ErrCorruptSSTable,
-				header.RawLen,
-				len(storedPayload),
-			)
-		}
-
-		return storedPayload, nil
-	default:
+	logical, err := compression.Decompress(
+		storedPayload,
+		header.RawLen,
+		header.Codec,
+	)
+	if err != nil {
 		return nil, fmt.Errorf(
-			"%w: unknown compression type %d",
+			"%w: decompress block: %w",
 			ErrCorruptSSTable,
-			header.Codec,
+			err,
 		)
 	}
+
+	return logical, nil
 }
 
 func decodeLogicalBlock(buf []byte) ([]record.Record, error) {
