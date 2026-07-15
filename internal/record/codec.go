@@ -15,8 +15,8 @@ const (
 	// 1 byte for flags
 	HeaderSize = 4 + 4 + 8 + 1
 
-	MaxKeySize   = 1 * 1024 * 1024   // 1MB
-	MaxValueSize = 256 * 1024 * 1024 // 256MB
+	MaxKeySize   = 64 * 1024        // 64KB
+	MaxValueSize = 64 * 1024 * 1024 // 64MB
 )
 
 type remainingReader interface {
