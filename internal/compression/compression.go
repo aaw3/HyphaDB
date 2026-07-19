@@ -9,22 +9,19 @@ const (
 	LZ4
 )
 
-const DefaultMinSavingsRate = 0.125
-
 func Compress(
 	src []byte,
 	requested Type,
-	minSavingsRate float64,
-) ([]byte, Type, error) {
+) ([]byte, error) {
 	switch requested {
 	case None:
-		return src, None, nil
+		return src, nil
 
 	case LZ4:
-		return compressLZ4(src, minSavingsRate)
+		return compressLZ4(src)
 
 	default:
-		return nil, None, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"unknown compression type: %d",
 			requested,
 		)
@@ -56,23 +53,4 @@ func Decompress(
 			codec,
 		)
 	}
-}
-
-func ShouldCompress(
-	rawSize int,
-	compressedSize int,
-	minSavingsRate float64,
-) bool {
-	if rawSize <= 0 {
-		return false
-	}
-
-	if compressedSize >= rawSize {
-		return false
-	}
-
-	saved := rawSize - compressedSize
-	savingsRate := float64(saved) / float64(rawSize)
-
-	return savingsRate >= minSavingsRate
 }

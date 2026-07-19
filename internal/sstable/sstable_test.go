@@ -275,13 +275,14 @@ func TestCompressedSSTableRoundTrip(t *testing.T) {
 		},
 	}
 
+	opts := DefaultWriteOptions()
 	sst, err := CreateFromRecordsWithOptions(
 		records,
 		path,
 		WriteOptions{
-			BlockSize:      DefaultBlockSize,
-			Compression:    compression.LZ4,
-			MinSavingsRate: DefaultMinCompressionSavingsRate,
+			BlockSize:                 opts.BlockSize,
+			Compression:               compression.LZ4,
+			MinCompressionSavingsRate: opts.MinCompressionSavingsRate,
 		},
 	)
 	if err != nil {
@@ -325,13 +326,14 @@ func TestCompressedSSTableIterator(t *testing.T) {
 		},
 	}
 
+	opts := DefaultWriteOptions()
 	sst, err := CreateFromRecordsWithOptions(
 		records,
 		path,
 		WriteOptions{
-			BlockSize:      2048,
-			Compression:    compression.LZ4,
-			MinSavingsRate: compression.DefaultMinSavingsRate,
+			BlockSize:                 2048,
+			Compression:               compression.LZ4,
+			MinCompressionSavingsRate: opts.MinCompressionSavingsRate,
 		},
 	)
 	if err != nil {
@@ -380,13 +382,14 @@ func TestCompressedSSTableMaxSeq(t *testing.T) {
 		},
 	}
 
+	opts := DefaultWriteOptions()
 	sst, err := CreateFromRecordsWithOptions(
 		records,
 		path,
 		WriteOptions{
-			BlockSize:      2048,
-			Compression:    compression.LZ4,
-			MinSavingsRate: compression.DefaultMinSavingsRate,
+			BlockSize:                 2048,
+			Compression:               compression.LZ4,
+			MinCompressionSavingsRate: opts.MinCompressionSavingsRate,
 		},
 	)
 	if err != nil {
@@ -416,13 +419,14 @@ func TestCompressedSSTableCorruptionReturnsErrCorrupt(t *testing.T) {
 		},
 	}
 
+	opts := DefaultWriteOptions()
 	sst, err := CreateFromRecordsWithOptions(
 		records,
 		path,
 		WriteOptions{
-			BlockSize:      DefaultBlockSize,
-			Compression:    compression.LZ4,
-			MinSavingsRate: compression.DefaultMinSavingsRate,
+			BlockSize:                 DefaultBlockSize,
+			Compression:               compression.LZ4,
+			MinCompressionSavingsRate: opts.MinCompressionSavingsRate,
 		},
 	)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
 
 	"github.com/aaw3/hyphadb/internal/compression"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -43,13 +44,30 @@ func encodePhysicalBlock(
 		)
 	}
 
-	storedPayload, actualCodec, err := compression.Compress(
-		logical,
-		reqCodec,
-		minSavingsRate,
-	)
-	if err != nil {
-		return nil, err
+	storedPayload := logical
+	actualCodec := compression.None
+
+	if reqCodec != compression.None {
+		compressed, err := compression.Compress(
+			logical,
+			reqCodec,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%w: compress block: %w",
+				ErrCorruptSSTable,
+				err,
+			)
+		}
+
+		if shouldCompress(
+			len(logical),
+			len(compressed),
+			minSavingsRate,
+		) {
+			storedPayload = compressed
+			actualCodec = reqCodec
+		}
 	}
 
 	header := BlockHeader{
@@ -189,4 +207,71 @@ func decodeBlock(physical []byte) ([]record.Record, error) {
 	}
 
 	return decodeLogicalBlock(logical)
+}
+
+func (s *SSTable) readBlock(entry IndexEntry) ([]byte, error) {
+	file, err := os.Open(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return readBlockFrom(file, entry)
+}
+
+// keep file open for reading blocks, to avoid reopening the file for each block read
+func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
+	maxStoredBlockSize := uint64(maxBlockSize) + uint64(blockHeaderSize) + uint64(blockTrailerSize)
+
+	if entry.Length == 0 {
+		return nil, fmt.Errorf(
+			"%w: block at offset %d has zero length",
+			ErrCorruptSSTable,
+			entry.Offset,
+		)
+	}
+	if uint64(entry.Length) > maxStoredBlockSize {
+		return nil, fmt.Errorf(
+			"%w: block at offset %d has length %d exceeding maximum stored block size %d",
+			ErrCorruptSSTable,
+			entry.Offset,
+			entry.Length,
+			maxStoredBlockSize,
+		)
+	}
+
+	if _, err := file.Seek(int64(entry.Offset), io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, entry.Length)
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, fmt.Errorf(
+			"%w: read block at offset %d: %v",
+			ErrCorruptSSTable,
+			entry.Offset,
+			err,
+		)
+	}
+
+	return buf, nil
+}
+
+// ===================
+// Compression Helper
+// ===================
+
+func shouldCompress(
+	rawSize int,
+	compressedSize int,
+	minSavingsRate float64,
+) bool {
+	if rawSize <= 0 || compressedSize >= rawSize {
+		return false
+	}
+
+	savingsRate :=
+		float64(rawSize-compressedSize) / float64(rawSize)
+
+	return savingsRate >= minSavingsRate
 }

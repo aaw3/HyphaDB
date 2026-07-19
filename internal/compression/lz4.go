@@ -8,17 +8,16 @@ import (
 
 func compressLZ4(
 	src []byte,
-	minSavingsRate float64,
-) ([]byte, Type, error) {
+) ([]byte, error) {
 	if len(src) == 0 {
-		return src, None, nil
+		return src, nil
 	}
 
 	dst := make([]byte, lz4.CompressBlockBound(len(src)))
 
 	n, err := lz4.CompressBlock(src, dst, nil)
 	if err != nil {
-		return nil, None, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"lz4 compression failed: %w",
 			err,
 		)
@@ -26,16 +25,12 @@ func compressLZ4(
 
 	// LZ4 returns 0 if source is not compressible
 	if n == 0 {
-		return src, None, nil
+		return src, nil
 	}
 
 	dst = dst[:n]
 
-	if !ShouldCompress(len(src), len(dst), minSavingsRate) {
-		return src, None, nil
-	}
-
-	return dst, LZ4, nil
+	return dst, nil
 }
 
 func decompressLZ4(

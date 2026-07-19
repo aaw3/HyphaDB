@@ -9,16 +9,9 @@ import (
 func TestCompressNoneReturnsOriginalPayload(t *testing.T) {
 	src := []byte("hello world")
 
-	got, codec, err := Compress(src, None, DefaultMinSavingsRate)
+	got, err := Compress(src, None)
 	if err != nil {
 		t.Fatalf("Compress error: %v", err)
-	}
-
-	if codec != None {
-		t.Fatalf("codec = %d, want %d",
-			codec,
-			None,
-		)
 	}
 
 	if !bytes.Equal(got, src) {
@@ -54,17 +47,12 @@ func TestCompressLZ4CompressiblePayload(t *testing.T) {
 		4096,
 	)
 
-	compressed, codec, err := Compress(
+	compressed, err := Compress(
 		src,
 		LZ4,
-		0.125,
 	)
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
-	}
-
-	if codec != LZ4 {
-		t.Fatalf("codec = %d, want LZ4", codec)
 	}
 
 	if len(compressed) >= len(src) {
@@ -78,7 +66,7 @@ func TestCompressLZ4CompressiblePayload(t *testing.T) {
 	got, err := Decompress(
 		compressed,
 		uint32(len(src)),
-		codec,
+		LZ4,
 	)
 	if err != nil {
 		t.Fatalf("Decompress error: %v", err)
@@ -89,7 +77,7 @@ func TestCompressLZ4CompressiblePayload(t *testing.T) {
 	}
 }
 
-func TestCompressLZ4FallsBackForIncompressiblePayload(t *testing.T) {
+func TestCompressLZ4IncompressiblePayloadStillRoundTrips(t *testing.T) {
 	src := make([]byte, 64*1024)
 
 	rng := rand.New(rand.NewSource(1))
@@ -97,92 +85,37 @@ func TestCompressLZ4FallsBackForIncompressiblePayload(t *testing.T) {
 		t.Fatalf("generate random bytes: %v", err)
 	}
 
-	stored, codec, err := Compress(
-		src,
-		LZ4,
-		0.125,
-	)
+	compressed, err := Compress(src, LZ4)
 	if err != nil {
 		t.Fatalf("Compress error: %v", err)
 	}
 
-	if codec != None {
-		t.Fatalf("codec = %d, want %d",
-			codec,
-			None,
+	got, err := Decompress(
+		compressed,
+		uint32(len(src)),
+		LZ4,
+	)
+	if err != nil {
+		t.Fatalf("Decompress error: %v", err)
+	}
+
+	if len(compressed) < len(src) {
+		t.Fatalf(
+			"compressed incompressible payload unexpectedly shrank: got %d, raw %d",
+			len(compressed),
+			len(src),
 		)
 	}
 
-	if !bytes.Equal(stored, src) {
-		t.Fatal("fallback payload does not match source")
-	}
-}
-
-func TestCompressionSavingsThreshold(t *testing.T) {
-	tests := []struct {
-		name           string
-		rawSize        int
-		compressedSize int
-		minSavings     float64
-		want           bool
-	}{
-		{
-			name:           "exact threshold",
-			rawSize:        100,
-			compressedSize: 87,
-			minSavings:     0.13,
-			want:           true,
-		},
-		{
-			name:           "below threshold",
-			rawSize:        100,
-			compressedSize: 90,
-			minSavings:     0.125,
-			want:           false,
-		},
-		{
-			name:           "compressed larger than raw",
-			rawSize:        100,
-			compressedSize: 110,
-			minSavings:     0,
-			want:           false,
-		},
-		{
-			name:           "empty input",
-			rawSize:        0,
-			compressedSize: 0,
-			minSavings:     0,
-			want:           false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ShouldCompress(
-				tt.rawSize,
-				tt.compressedSize,
-				tt.minSavings,
-			)
-
-			if got != tt.want {
-				t.Fatalf(
-					"ShouldCompress(%d, %d, %f) = %v, want %v",
-					tt.rawSize,
-					tt.compressedSize,
-					tt.minSavings,
-					got,
-					tt.want,
-				)
-			}
-		})
+	if !bytes.Equal(got, src) {
+		t.Fatal("decompressed payload does not match source")
 	}
 }
 
 func TestCompressRejectsUnknownCodec(t *testing.T) {
-	_, _, err := Compress(
+	_, err := Compress(
 		[]byte("data"),
 		Type(99),
-		0.125,
 	)
 
 	if err == nil {

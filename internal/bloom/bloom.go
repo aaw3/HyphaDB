@@ -10,10 +10,6 @@ import (
 
 var ErrInvalidFilter = errors.New("invalid bloom filter")
 
-const (
-	DefaultFalsePositiveRate = 0.01
-)
-
 type Filter struct {
 	bits      []byte
 	bitCount  uint64

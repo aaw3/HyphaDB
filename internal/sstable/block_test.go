@@ -261,3 +261,84 @@ func TestEncodePhysicalBlockFallsBackForIncompressibleData(t *testing.T) {
 		t.Fatal("decoded logical block does not match input")
 	}
 }
+
+func TestShouldCompress(t *testing.T) {
+	tests := []struct {
+		name           string
+		rawSize        int
+		compressedSize int
+		minSavingsRate float64
+		want           bool
+	}{
+		{
+			name:           "exact threshold",
+			rawSize:        100,
+			compressedSize: 87,
+			minSavingsRate: 0.13,
+			want:           true,
+		},
+		{
+			name:           "above threshold",
+			rawSize:        100,
+			compressedSize: 80,
+			minSavingsRate: 0.125,
+			want:           true,
+		},
+		{
+			name:           "below threshold",
+			rawSize:        100,
+			compressedSize: 90,
+			minSavingsRate: 0.125,
+			want:           false,
+		},
+		{
+			name:           "same size",
+			rawSize:        100,
+			compressedSize: 100,
+			minSavingsRate: 0,
+			want:           false,
+		},
+		{
+			name:           "compressed larger than raw",
+			rawSize:        100,
+			compressedSize: 110,
+			minSavingsRate: 0,
+			want:           false,
+		},
+		{
+			name:           "empty input",
+			rawSize:        0,
+			compressedSize: 0,
+			minSavingsRate: 0,
+			want:           false,
+		},
+		{
+			name:           "negative raw size",
+			rawSize:        -1,
+			compressedSize: 0,
+			minSavingsRate: 0,
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldCompress(
+				tt.rawSize,
+				tt.compressedSize,
+				tt.minSavingsRate,
+			)
+
+			if got != tt.want {
+				t.Fatalf(
+					"shouldCompress(%d, %d, %f) = %v, want %v",
+					tt.rawSize,
+					tt.compressedSize,
+					tt.minSavingsRate,
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}
