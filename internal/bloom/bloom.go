@@ -64,8 +64,15 @@ func New(expectedItems int, falsePositiveRate float64) (*Filter, error) {
 func hashPair(key []byte) (uint64, uint64) {
 	hash := xxh3.Hash128(key)
 
-	// ensure a nonzero odd increment; oddness is useful for power of two tables
-	return hash.Lo, hash.Hi | 1
+	var high = hash.Hi
+	var low = hash.Lo
+
+	// high is 0, use fibonacci hashing for step to avoid clustering
+	if hash.Hi == 0 {
+		high = 0x9e3779b97f4a7c15
+	}
+
+	return low, high
 }
 
 // Insert a key into the Bloom filter
