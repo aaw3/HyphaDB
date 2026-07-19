@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/aaw3/hyphadb/internal/bloom"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -20,9 +21,9 @@ var ErrUnsortedRecords = errors.New("records are not sorted")
 
 const (
 	DefaultBlockSize = 64 * 1024 // 64KB
-	footerSize       = 24
+	footerSize       = 40
 
-	currentFormatVersion = 1
+	currentFormatVersion = 2
 
 	DefaultMinCompressionSavingsRate = 0.125
 )
@@ -32,14 +33,22 @@ var tableMagic = [6]byte{'H', 'Y', 'P', 'S', 'S', 'T'}
 type SSTable struct {
 	Path string
 
-	indexMu sync.RWMutex
-	index   []IndexEntry
+	metaMu sync.RWMutex
+	index  []IndexEntry
+	filter *bloom.Filter
 }
 
 type IndexEntry struct {
 	FirstKey string
 	Offset   uint64
 	Length   uint32
+}
+
+type footerMetadata struct {
+	indexOffset  uint64
+	indexLength  uint64
+	filterOffset uint64
+	filterLength uint64
 }
 
 func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
@@ -65,6 +74,17 @@ func CreateFromRecordsWithOptions(
 	opts, err := normalizeWriteOptions(opts)
 	if err != nil {
 		return nil, err
+	}
+
+	var filter *bloom.Filter
+
+	bloomFilterEnabled := opts.Bloom.Enabled && len(records) > 0
+
+	if bloomFilterEnabled {
+		filter, err = bloom.New(len(records), opts.Bloom.FalsePositiveRate)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create bloom filter: %w", err)
+		}
 	}
 
 	file, err := os.Create(path)
@@ -138,6 +158,10 @@ func CreateFromRecordsWithOptions(
 			)
 		}
 
+		if bloomFilterEnabled {
+			filter.Add([]byte(rec.Key))
+		}
+
 		if recordCount == 0 {
 			startBlock(rec.Key)
 		}
@@ -180,26 +204,60 @@ func CreateFromRecordsWithOptions(
 
 	indexLength := uint64(indexEnd - indexOffset)
 
+	var filterOffset uint64
+	var filterLength uint64
+
+	if filter != nil {
+		offset, err := file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+
+		encodedFilter, err := filter.Encode()
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode bloom filter: %w", err)
+		}
+
+		if _, err := file.Write(encodedFilter); err != nil {
+			return nil, fmt.Errorf("failed to write bloom filter: %w", err)
+		}
+
+		filterOffset = uint64(offset)
+		filterLength = uint64(len(encodedFilter))
+	}
+
 	// write the footer at the end of the file
-	if err := writeFooter(file, uint64(indexOffset), indexLength); err != nil {
+	if err := writeFooter(
+		file,
+		uint64(indexOffset),
+		indexLength,
+		filterOffset,
+		filterLength,
+	); err != nil {
 		return nil, err
 	}
 
 	return &SSTable{
-		Path:  path,
-		index: index,
+		Path:   path,
+		index:  index,
+		filter: filter,
 	}, nil
 }
 
 func (s *SSTable) Open(key string) ([]byte, error) {
-	if err := s.loadIndex(); err != nil {
+	if err := s.loadMetadata(); err != nil {
 		return nil, err
 	}
 
-	s.indexMu.RLock()
+	s.metaMu.RLock()
+
+	if s.filter != nil && !s.filter.MayContain([]byte(key)) {
+		s.metaMu.RUnlock()
+		return nil, ErrNotFound
+	}
 
 	if len(s.index) == 0 {
-		s.indexMu.RUnlock()
+		s.metaMu.RUnlock()
 		return nil, ErrNotFound
 	}
 
@@ -209,12 +267,12 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 	}) - 1
 
 	if i < 0 {
-		s.indexMu.RUnlock()
+		s.metaMu.RUnlock()
 		return nil, ErrNotFound
 	}
 
 	entry := s.index[i]
-	s.indexMu.RUnlock()
+	s.metaMu.RUnlock()
 
 	// read the physical block from the file
 	physical, err := s.readBlock(entry)
@@ -269,17 +327,17 @@ func (s *SSTable) MaxSeq() (uint64, error) {
 	return maxSeq, nil
 }
 
-func (s *SSTable) loadIndex() error {
-	s.indexMu.RLock()
+func (s *SSTable) loadMetadata() error {
+	s.metaMu.RLock()
 	loaded := s.index != nil
-	s.indexMu.RUnlock()
+	s.metaMu.RUnlock()
 
 	if loaded {
 		return nil
 	}
 
-	s.indexMu.Lock()
-	defer s.indexMu.Unlock()
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
 
 	// A go routine may have loaded the index while waiting for lock
 	if s.index != nil {
@@ -293,27 +351,65 @@ func (s *SSTable) loadIndex() error {
 	defer file.Close()
 
 	// parse the footer
-	indexOffset, indexLength, err := readFooter(file)
+	footer, err := readFooter(file)
 	if err != nil {
 		return err
 	}
 
-	if _, err := file.Seek(int64(indexOffset), io.SeekStart); err != nil {
+	if _, err := file.Seek(int64(footer.indexOffset), io.SeekStart); err != nil {
 		return err
 	}
 
-	// read the index from the file
-	buf := make([]byte, indexLength)
-	if _, err := io.ReadFull(file, buf); err != nil {
-		return err
+	indexBuf := make([]byte, footer.indexLength)
+	if _, err := file.ReadAt(indexBuf, int64(footer.indexOffset)); err != nil {
+		return fmt.Errorf(
+			"%w: read index at offset %d: %v",
+			ErrCorruptSSTable,
+			footer.indexOffset,
+			err,
+		)
 	}
 
-	index, err := decodeIndex(buf)
+	index, err := decodeIndex(indexBuf)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"%w: decode index at offset %d: %v",
+			ErrCorruptSSTable,
+			footer.indexOffset,
+			err,
+		)
+	}
+
+	var filter *bloom.Filter
+
+	if footer.filterLength > 0 {
+		filterBuf := make([]byte, footer.filterLength)
+
+		if _, err := file.ReadAt(
+			filterBuf,
+			int64(footer.filterOffset),
+		); err != nil {
+			return fmt.Errorf(
+				"%w: read bloom filter at offset %d: %v",
+				ErrCorruptSSTable,
+				footer.filterOffset,
+				err,
+			)
+		}
+
+		filter, err = bloom.Decode(filterBuf)
+		if err != nil {
+			return fmt.Errorf(
+				"%w: decode bloom filter at offset %d: %v",
+				ErrCorruptSSTable,
+				footer.filterOffset,
+				err,
+			)
+		}
 	}
 
 	s.index = index
+	s.filter = filter
 	return nil
 }
 
@@ -365,65 +461,74 @@ func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
 	return buf, nil
 }
 
-func writeFooter(w io.Writer, indexOffset uint64, indexLength uint64) error {
+func writeFooter(
+	w io.Writer,
+	indexOffset uint64,
+	indexLength uint64,
+	filterOffset uint64,
+	filterLength uint64,
+) error {
 	var footer [footerSize]byte
 
 	binary.LittleEndian.PutUint64(footer[0:8], indexOffset)
 	binary.LittleEndian.PutUint64(footer[8:16], indexLength)
+	binary.LittleEndian.PutUint64(footer[16:24], filterOffset)
+	binary.LittleEndian.PutUint64(footer[24:32], filterLength)
 
-	copy(footer[16:22], tableMagic[:])
-	footer[22] = currentFormatVersion
-	footer[23] = 0 // reserved flags byte
+	copy(footer[32:38], tableMagic[:])
+	footer[38] = currentFormatVersion
+	footer[39] = 0 // reserved flags byte
 
 	_, err := w.Write(footer[:])
 	return err
 }
-func readFooter(file *os.File) (uint64, uint64, error) {
+
+func readFooter(file *os.File) (footerMetadata, error) {
 	info, err := file.Stat()
 	if err != nil {
-		return 0, 0, err
+		return footerMetadata{}, err
 	}
 
 	fileSize := uint64(info.Size())
 
 	if fileSize < footerSize {
-		return 0, 0, fmt.Errorf("%w: SSTable too small",
+		return footerMetadata{}, fmt.Errorf("%w: SSTable too small",
 			ErrCorruptSSTable,
 		)
 	}
 
 	if _, err := file.Seek(-footerSize, io.SeekEnd); err != nil {
-		return 0, 0, err
+		return footerMetadata{}, err
 	}
 
 	var footer [footerSize]byte
 	if _, err := io.ReadFull(file, footer[:]); err != nil {
-		return 0, 0, fmt.Errorf(
+		return footerMetadata{}, fmt.Errorf(
 			"%w: read footer: %v",
 			ErrCorruptSSTable,
 			err,
 		)
 	}
 
-	if !bytes.Equal(footer[16:22], tableMagic[:]) {
-		return 0, 0, fmt.Errorf(
+	if !bytes.Equal(footer[32:38], tableMagic[:]) {
+		return footerMetadata{}, fmt.Errorf(
 			"%w: invalid SSTable magic string",
 			ErrCorruptSSTable,
 		)
 	}
 
-	version := footer[22]
+	version := footer[38]
 	if version != currentFormatVersion {
-		return 0, 0, fmt.Errorf(
+		return footerMetadata{}, fmt.Errorf(
 			"%w: unsupported SSTable format version: %d",
 			ErrCorruptSSTable,
 			version,
 		)
 	}
 
-	flags := footer[23]
+	flags := footer[39]
 	if flags != 0 { // reserved for future use, only zero is supported currently
-		return 0, 0, fmt.Errorf(
+		return footerMetadata{}, fmt.Errorf(
 			"%w: unsupported sstable footer flags: %#x",
 			ErrCorruptSSTable,
 			flags,
@@ -432,12 +537,14 @@ func readFooter(file *os.File) (uint64, uint64, error) {
 
 	indexOffset := binary.LittleEndian.Uint64(footer[0:8])
 	indexLength := binary.LittleEndian.Uint64(footer[8:16])
+	filterOffset := binary.LittleEndian.Uint64(footer[16:24])
+	filterLength := binary.LittleEndian.Uint64(footer[24:32])
 
 	dataEnd := fileSize - uint64(footerSize)
 
 	if indexOffset > dataEnd {
-		return 0, 0, fmt.Errorf(
-			"%w: index offset %d exceeds data end %d",
+		return footerMetadata{}, fmt.Errorf(
+			"%w: index offset %d exceeds metadata boundary %d",
 			ErrCorruptSSTable,
 			indexOffset,
 			dataEnd,
@@ -445,7 +552,7 @@ func readFooter(file *os.File) (uint64, uint64, error) {
 	}
 
 	if indexLength > dataEnd-indexOffset {
-		return 0, 0, fmt.Errorf(
+		return footerMetadata{}, fmt.Errorf(
 			"%w: index length %d exceeds data end %d minus index offset %d",
 			ErrCorruptSSTable,
 			indexLength,
@@ -454,7 +561,70 @@ func readFooter(file *os.File) (uint64, uint64, error) {
 		)
 	}
 
-	return indexOffset, indexLength, nil
+	indexEnd := indexOffset + indexLength
+
+	if filterLength == 0 {
+		if filterOffset != 0 {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter length is zero but filter offset is non-zero (%d)",
+				ErrCorruptSSTable,
+				filterOffset,
+			)
+		}
+
+		if indexEnd != dataEnd {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter length is zero but index end %d does not match data end %d",
+				ErrCorruptSSTable,
+				indexEnd,
+				dataEnd,
+			)
+		}
+	} else {
+		if filterOffset != indexEnd {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter offset %d does not match index end %d",
+				ErrCorruptSSTable,
+				filterOffset,
+				indexEnd,
+			)
+		}
+
+		if filterOffset > dataEnd {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter offset %d exceeds metadata boundary %d",
+				ErrCorruptSSTable,
+				filterOffset,
+				dataEnd,
+			)
+		}
+
+		if filterLength > dataEnd-filterOffset {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter length %d exceeds data end %d minus filter offset %d",
+				ErrCorruptSSTable,
+				filterLength,
+				dataEnd,
+				filterOffset,
+			)
+		}
+
+		if filterOffset+filterLength != dataEnd {
+			return footerMetadata{}, fmt.Errorf(
+				"%w: filter end %d does not match data end %d",
+				ErrCorruptSSTable,
+				filterOffset+filterLength,
+				dataEnd,
+			)
+		}
+	}
+
+	return footerMetadata{
+		indexOffset,
+		indexLength,
+		filterOffset,
+		filterLength,
+	}, nil
 }
 
 func writeIndex(w io.Writer, index []IndexEntry) error {

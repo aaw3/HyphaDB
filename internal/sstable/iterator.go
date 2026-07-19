@@ -17,7 +17,7 @@ type Iterator struct {
 }
 
 func (s *SSTable) Iterator() (*Iterator, error) {
-	if err := s.loadIndex(); err != nil {
+	if err := s.loadMetadata(); err != nil {
 		return nil, err
 	}
 
