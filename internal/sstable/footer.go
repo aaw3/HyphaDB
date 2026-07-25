@@ -8,7 +8,9 @@ import (
 )
 
 const (
-	footerSize = 40
+	footerSize    = 40
+	maxIndexSize  = 256 << 20 // 256MB
+	maxFilterSize = 256 << 20 // 256MB
 
 	currentFormatVersion = 2
 )
@@ -36,7 +38,7 @@ func writeFooter(
 	binary.LittleEndian.PutUint64(footer[16:24], filterOffset)
 	binary.LittleEndian.PutUint64(footer[24:32], filterLength)
 
-	copy(footer[32:38], tableMagic[:])
+	copy(footer[32:38], tableMagic)
 	footer[38] = currentFormatVersion
 	footer[39] = 0 // reserved flags byte
 
@@ -50,7 +52,16 @@ func readFooter(file *os.File) (footerMetadata, error) {
 		return footerMetadata{}, err
 	}
 
-	fileSize := uint64(info.Size())
+	size := info.Size()
+	if size < 0 {
+		return footerMetadata{}, fmt.Errorf(
+			"%w: SSTable file size %d is negative",
+			ErrCorruptSSTable,
+			size,
+		)
+	}
+
+	fileSize := uint64(size)
 
 	if fileSize < footerSize {
 		return footerMetadata{}, fmt.Errorf("%w: SSTable too small",
@@ -58,12 +69,10 @@ func readFooter(file *os.File) (footerMetadata, error) {
 		)
 	}
 
-	if _, err := file.Seek(-footerSize, io.SeekEnd); err != nil {
-		return footerMetadata{}, err
-	}
+	footerOffset := size - int64(footerSize)
 
 	var footer [footerSize]byte
-	if _, err := io.ReadFull(file, footer[:]); err != nil {
+	if _, err := file.ReadAt(footer[:], footerOffset); err != nil {
 		return footerMetadata{}, fmt.Errorf(
 			"%w: read footer: %v",
 			ErrCorruptSSTable,
@@ -71,7 +80,7 @@ func readFooter(file *os.File) (footerMetadata, error) {
 		)
 	}
 
-	if string(footer[32:38]) != tableMagic[:] {
+	if string(footer[32:38]) != tableMagic {
 		return footerMetadata{}, fmt.Errorf(
 			"%w: invalid SSTable magic string",
 			ErrCorruptSSTable,
@@ -181,9 +190,9 @@ func readFooter(file *os.File) (footerMetadata, error) {
 	}
 
 	return footerMetadata{
-		indexOffset,
-		indexLength,
-		filterOffset,
-		filterLength,
+		indexOffset:  indexOffset,
+		indexLength:  indexLength,
+		filterOffset: filterOffset,
+		filterLength: filterLength,
 	}, nil
 }

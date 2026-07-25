@@ -153,6 +153,14 @@ func CreateFromRecordsWithOptions(
 		return nil, err
 	}
 
+	if indexOffset < 0 {
+		return nil, fmt.Errorf(
+			"%w: index offset %d is negative",
+			ErrCorruptSSTable,
+			indexOffset,
+		)
+	}
+
 	// write the index after the blocks and before the footer
 	if err := writeIndex(file, index); err != nil {
 		return nil, err
@@ -181,6 +189,14 @@ func CreateFromRecordsWithOptions(
 
 		if _, err := file.Write(encodedFilter); err != nil {
 			return nil, fmt.Errorf("failed to write bloom filter: %w", err)
+		}
+
+		if offset < 0 {
+			return nil, fmt.Errorf(
+				"%w: bloom filter offset %d is negative",
+				ErrCorruptSSTable,
+				offset,
+			)
 		}
 
 		filterOffset = uint64(offset)
