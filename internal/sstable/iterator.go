@@ -9,6 +9,7 @@ import (
 type Iterator struct {
 	sst          *SSTable
 	file         *os.File
+	index        []IndexEntry
 	blockIndex   int
 	blockRecords []record.Record
 	recordIndex  int
@@ -26,9 +27,14 @@ func (s *SSTable) Iterator() (*Iterator, error) {
 		return nil, err
 	}
 
+	s.metaMu.RLock()
+	index := s.index
+	s.metaMu.RUnlock()
+
 	return &Iterator{
 		sst:         s,
 		file:        file,
+		index:       index,
 		blockIndex:  -1,
 		recordIndex: -1,
 	}, nil
@@ -49,19 +55,19 @@ func (it *Iterator) Next() bool {
 
 	// move to the next block
 	it.blockIndex++
-	if it.blockIndex >= len(it.sst.index) {
+	if it.blockIndex >= len(it.index) {
 		return false
 	}
 
 	// read the next block from the SSTable file
-	physical, err := readBlockFrom(it.file, it.sst.index[it.blockIndex])
+	logical, err := it.sst.readLogicalBlockFrom(it.file, it.index[it.blockIndex])
 	if err != nil {
 		it.err = err
 		return false
 	}
 
-	// decode the physical block into records
-	records, err := decodeBlock(physical)
+	// decode the logical block into records
+	records, err := decodeLogicalBlock(logical)
 	if err != nil {
 		it.err = err
 		return false

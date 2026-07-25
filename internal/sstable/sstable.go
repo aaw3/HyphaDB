@@ -3,10 +3,12 @@ package sstable
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"sync"
 
+	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/bloom"
 )
 
@@ -15,11 +17,28 @@ var ErrDeleted = errors.New("key has been deleted")
 var ErrUnsortedRecords = errors.New("records are not sorted")
 
 type SSTable struct {
+	ID   uint64
 	Path string
 
-	metaMu sync.RWMutex
-	index  []IndexEntry
-	filter *bloom.Filter
+	cache blockcache.Cache
+
+	metaMu     sync.RWMutex
+	metaLoaded bool
+	index      []IndexEntry
+	filter     *bloom.Filter
+}
+
+type OpenOptions struct {
+	ID         uint64
+	BlockCache blockcache.Cache
+}
+
+func New(path string, opts OpenOptions) *SSTable {
+	return &SSTable{
+		ID:    opts.ID,
+		Path:  path,
+		cache: opts.BlockCache,
+	}
 }
 
 func (s *SSTable) Open(key string) ([]byte, error) {
@@ -53,13 +72,13 @@ func (s *SSTable) Open(key string) ([]byte, error) {
 	s.metaMu.RUnlock()
 
 	// read the physical block from the file
-	physical, err := s.readBlock(entry)
+	logical, err := s.readLogicalBlock(entry)
 	if err != nil {
 		return nil, err
 	}
 
 	// decode the block into records
-	records, err := decodeBlock(physical)
+	records, err := decodeLogicalBlock(logical)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +126,7 @@ func (s *SSTable) MaxSeq() (uint64, error) {
 
 func (s *SSTable) loadMetadata() error {
 	s.metaMu.RLock()
-	loaded := s.index != nil
+	loaded := s.metaLoaded
 	s.metaMu.RUnlock()
 
 	if loaded {
@@ -118,7 +137,7 @@ func (s *SSTable) loadMetadata() error {
 	defer s.metaMu.Unlock()
 
 	// A go routine may have loaded the index while waiting for lock
-	if s.index != nil {
+	if s.metaLoaded {
 		return nil
 	}
 
@@ -134,7 +153,12 @@ func (s *SSTable) loadMetadata() error {
 		return err
 	}
 
-	indexBuf := make([]byte, footer.indexLength)
+	indexLength, err := checkedBufferLength(footer.indexLength, maxIndexSize, "index")
+	if err != nil {
+		return err
+	}
+
+	indexBuf := make([]byte, indexLength)
 	if _, err := file.ReadAt(indexBuf, int64(footer.indexOffset)); err != nil {
 		return fmt.Errorf(
 			"%w: read index at offset %d: %v",
@@ -156,8 +180,13 @@ func (s *SSTable) loadMetadata() error {
 
 	var filter *bloom.Filter
 
-	if footer.filterLength > 0 {
-		filterBuf := make([]byte, footer.filterLength)
+	filterLength, err := checkedBufferLength(footer.filterLength, maxFilterLength, "filter")
+	if err != nil {
+		return err
+	}
+
+	if filterLength > 0 {
+		filterBuf := make([]byte, filterLength)
 
 		if _, err := file.ReadAt(
 			filterBuf,
@@ -184,5 +213,38 @@ func (s *SSTable) loadMetadata() error {
 
 	s.index = index
 	s.filter = filter
+	s.metaLoaded = true
 	return nil
+}
+
+// =================
+//
+//	Buffer Helper
+//
+// =================
+func checkedBufferLength(
+	length uint64,
+	maxLength uint64,
+	field string,
+) (int, error) {
+	if length > maxLength {
+		return 0, fmt.Errorf(
+			"%w: %s length %d exceeds maximum %d",
+			ErrCorruptSSTable,
+			field,
+			length,
+			maxLength,
+		)
+	}
+
+	if length > uint64(math.MaxInt) {
+		return 0, fmt.Errorf(
+			"%w: %s length %d exceeds maximum allocation size",
+			ErrCorruptSSTable,
+			field,
+			length,
+		)
+	}
+
+	return int(length), nil
 }

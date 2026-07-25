@@ -502,7 +502,6 @@ func TestConcurrentMissingKeyReads(t *testing.T) {
 	}
 
 	for _, key := range []string{"a", "z"} {
-		key := key
 
 		t.Run(key, func(t *testing.T) {
 			var wg sync.WaitGroup

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 
+	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/compression"
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -209,16 +211,6 @@ func decodeBlock(physical []byte) ([]record.Record, error) {
 	return decodeLogicalBlock(logical)
 }
 
-func (s *SSTable) readBlock(entry IndexEntry) ([]byte, error) {
-	file, err := os.Open(s.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	return readBlockFrom(file, entry)
-}
-
 // keep file open for reading blocks, to avoid reopening the file for each block read
 func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
 	maxStoredBlockSize := uint64(maxBlockSize) + uint64(blockHeaderSize) + uint64(blockTrailerSize)
@@ -240,12 +232,16 @@ func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
 		)
 	}
 
-	if _, err := file.Seek(int64(entry.Offset), io.SeekStart); err != nil {
-		return nil, err
+	if entry.Offset > math.MaxInt64 {
+		return nil, fmt.Errorf(
+			"%w: block at offset %d exceeds max int64",
+			ErrCorruptSSTable,
+			entry.Offset,
+		)
 	}
 
 	buf := make([]byte, entry.Length)
-	if _, err := io.ReadFull(file, buf); err != nil {
+	if _, err := file.ReadAt(buf, int64(entry.Offset)); err != nil {
 		return nil, fmt.Errorf(
 			"%w: read block at offset %d: %v",
 			ErrCorruptSSTable,
@@ -255,6 +251,68 @@ func readBlockFrom(file *os.File, entry IndexEntry) ([]byte, error) {
 	}
 
 	return buf, nil
+}
+
+func (s *SSTable) readLogicalBlock(entry IndexEntry) ([]byte, error) {
+	cacheKey := s.blockCacheKey(entry)
+
+	if s.cache != nil {
+		if logical, ok := s.cache.Get(cacheKey); ok {
+			return logical, nil
+		}
+	}
+
+	file, err := os.Open(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return s.readLogicalBlockMiss(file, entry, cacheKey)
+}
+
+func (s *SSTable) readLogicalBlockFrom(
+	file *os.File,
+	entry IndexEntry,
+) ([]byte, error) {
+	cacheKey := s.blockCacheKey(entry)
+
+	if s.cache != nil {
+		if logical, ok := s.cache.Get(cacheKey); ok {
+			return logical, nil
+		}
+	}
+
+	return s.readLogicalBlockMiss(file, entry, cacheKey)
+}
+
+func (s *SSTable) readLogicalBlockMiss(
+	file *os.File,
+	entry IndexEntry,
+	cacheKey blockcache.Key,
+) ([]byte, error) {
+	physical, err := readBlockFrom(file, entry)
+	if err != nil {
+		return nil, err
+	}
+
+	logical, err := decodePhysicalBlock(physical)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.cache != nil {
+		s.cache.Set(cacheKey, logical)
+	}
+
+	return logical, nil
+}
+
+func (s *SSTable) blockCacheKey(entry IndexEntry) blockcache.Key {
+	return blockcache.Key{
+		TableID: s.ID,
+		Offset:  entry.Offset,
+	}
 }
 
 // ===================
