@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/compaction"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
@@ -21,6 +22,7 @@ type DB struct {
 	maxMemtableSize     int
 	memTableSize        int
 	sstables            []*sstable.SSTable
+	blockCache          blockcache.Cache
 	wal                 *wal.WAL
 	manifest            *manifest.Manifest
 	manifestPath        string
@@ -34,6 +36,8 @@ type DB struct {
 }
 
 var ErrClosed = errors.New("database is closed")
+
+const defaultBlockCacheCapacity = 64 * 1024 * 1024
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	manifestPath := "MANIFEST"
@@ -64,14 +68,26 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		return nil, err
 	}
 
-	sstables := make([]*sstable.SSTable, 0, len(mf.SSTables))
-	for _, table := range mf.SSTables {
-		sstables = append(sstables, sstable.New(table.Path, sstable.OpenOptions{
-			ID: table.ID,
-		}))
+	cache := blockcache.NewLRU(defaultBlockCacheCapacity)
+
+	database := &DB{
+		memtable:            mt,
+		maxMemtableSize:     maxMemtableSize,
+		memTableSize:        len(mt.Records()),
+		sstables:            make([]*sstable.SSTable, 0, len(mf.SSTables)),
+		blockCache:          cache,
+		wal:                 w,
+		manifest:            mf,
+		manifestPath:        manifestPath,
+		compactionThreshold: compactionThreshold,
+		flushSignal:         make(chan struct{}, 1),
 	}
 
-	sstableMaxSeq, err := maxSeqFromSSTables(sstables)
+	for _, table := range mf.SSTables {
+		database.sstables = append(database.sstables, database.newSSTable(table))
+	}
+
+	sstableMaxSeq, err := maxSeqFromSSTables(database.sstables)
 	if err != nil {
 		return nil, err
 	}
@@ -81,23 +97,19 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	maxSeq := max(sstableMaxSeq, memMaxSeq)
 	nextSeq := maxSeq + 1
 
-	database := &DB{
-		memtable:            mt,
-		maxMemtableSize:     maxMemtableSize,
-		memTableSize:        len(mt.Records()),
-		sstables:            sstables,
-		wal:                 w,
-		manifest:            mf,
-		manifestPath:        manifestPath,
-		compactionThreshold: compactionThreshold,
-		nextSeq:             nextSeq,
-		flushSignal:         make(chan struct{}, 1),
-	}
+	database.nextSeq = nextSeq
 
 	database.flushWG.Add(1)
 	go database.flushLoop()
 
 	return database, nil
+}
+
+func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
+	return sstable.New(meta.Path, sstable.OpenOptions{
+		ID:         meta.ID,
+		BlockCache: db.blockCache,
+	})
 }
 
 func (db *DB) Compact() error {
@@ -109,7 +121,7 @@ func (db *DB) Compact() error {
 func (db *DB) compactLocked() error {
 	id := db.manifest.NextSSTableID
 	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
-	compactedSSTable, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
+	_, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
 	if err != nil {
 		return err
 	}
@@ -119,12 +131,12 @@ func (db *DB) compactLocked() error {
 	oldNextSSTableID := db.manifest.NextSSTableID
 	oldTables := db.manifest.SSTables
 	db.manifest.NextSSTableID++
-	compactedSSTable.ID = id
+	compactedMeta := manifest.SSTableMetadata{
+		ID:   id,
+		Path: compactedSSTablePath,
+	}
 	db.manifest.SSTables = []manifest.SSTableMetadata{
-		{
-			ID:   compactedSSTable.ID,
-			Path: compactedSSTable.Path,
-		},
+		compactedMeta,
 	}
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
@@ -144,6 +156,7 @@ func (db *DB) compactLocked() error {
 	}
 
 	oldSSTables := db.sstables
+	compactedSSTable := db.newSSTable(compactedMeta)
 	db.sstables = []*sstable.SSTable{compactedSSTable}
 
 	for _, sst := range oldSSTables {
@@ -153,6 +166,7 @@ func (db *DB) compactLocked() error {
 				err,
 			)
 		}
+		db.blockCache.PurgeTable(sst.ID)
 	}
 
 	return nil
@@ -356,24 +370,26 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	db.manifest.NextSSTableID++
 	db.mu.Unlock()
 
-	sst, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
+	_, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
 	if err != nil {
 		db.mu.Lock()
 		db.manifest.NextSSTableID = oldNextSSTableID
 		db.mu.Unlock()
 		return err
 	}
-	sst.ID = id
+
+	meta := manifest.SSTableMetadata{
+		ID:   id,
+		Path: sstablePath,
+	}
+	sst := db.newSSTable(meta)
 
 	db.mu.Lock()
 	oldSSTableCount := len(db.sstables)
 	oldMetadataCount := len(db.manifest.SSTables)
 
 	db.sstables = append(db.sstables, sst)
-	db.manifest.SSTables = append(db.manifest.SSTables, manifest.SSTableMetadata{
-		ID:   sst.ID,
-		Path: sst.Path,
-	})
+	db.manifest.SSTables = append(db.manifest.SSTables, meta)
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		db.sstables = db.sstables[:oldSSTableCount]

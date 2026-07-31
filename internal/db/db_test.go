@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -31,6 +32,17 @@ func useTempWorkingDirectory(t *testing.T) {
 			t.Errorf("restore working directory failed: %v", err)
 		}
 	})
+}
+
+func dbLRUCache(t *testing.T, database *DB) *blockcache.LRU {
+	t.Helper()
+
+	cache, ok := database.blockCache.(*blockcache.LRU)
+	if !ok {
+		t.Fatalf("blockCache = %T, want *blockcache.LRU", database.blockCache)
+	}
+
+	return cache
 }
 
 func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
@@ -204,6 +216,301 @@ func TestCompactionPersistsSSTableMetadata(t *testing.T) {
 
 	if string(got) != "orange" {
 		t.Fatalf("carrot = %q, want orange", got)
+	}
+}
+
+func TestRecoveredSSTablesUseDBBlockCache(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(2, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put apple: %v", err)
+	}
+	if err := database.Put("banana", []byte("yellow")); err != nil {
+		t.Fatalf("Put banana: %v", err)
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := New(2, 10)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer reopened.Close()
+
+	cache := dbLRUCache(t, reopened)
+	cache.Delete(blockcache.Key{TableID: 0, Offset: 0})
+
+	got, err := reopened.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("apple = %q, want red", got)
+	}
+
+	if _, ok := cache.Get(blockcache.Key{TableID: 0, Offset: 0}); !ok {
+		t.Fatal("expected recovered SSTable read to populate DB block cache")
+	}
+}
+
+func TestFlushedSSTablesUseDBBlockCache(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put apple: %v", err)
+	}
+
+	imm := &memtable.ImmutableMemTable{
+		MemTable: database.memtable,
+		WalID:    database.wal.ID,
+	}
+	database.immutableMemtables = append(database.immutableMemtables, imm)
+	database.memtable = memtable.New()
+	database.memTableSize = 0
+
+	if err := database.flushImmutableMemtable(imm); err != nil {
+		t.Fatalf("flushImmutableMemtable: %v", err)
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("apple = %q, want red", got)
+	}
+
+	cache := dbLRUCache(t, database)
+	if _, ok := cache.Get(blockcache.Key{TableID: 0, Offset: 0}); !ok {
+		t.Fatal("expected flushed SSTable read to populate DB block cache")
+	}
+}
+
+func TestDBBlockCacheServesCachedBlockWhenFileUnavailable(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "apple",
+			Seq: 1,
+			Entry: record.Entry{
+				Value: []byte("red"),
+			},
+		},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create SSTable: %v", err)
+	}
+
+	database.sstables = []*sstable.SSTable{
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: "data-0.sst",
+		}),
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("first Get apple: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("first apple = %q, want red", got)
+	}
+
+	if err := os.Rename("data-0.sst", "data-0.sst.hidden"); err != nil {
+		t.Fatalf("rename SSTable: %v", err)
+	}
+
+	got, err = database.Get("apple")
+	if err != nil {
+		t.Fatalf("second Get apple from cache: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("second apple = %q, want red", got)
+	}
+}
+
+func TestDBBlockCacheSeparatesTablesByID(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "apple",
+			Seq: 1,
+			Entry: record.Entry{
+				Value: []byte("red"),
+			},
+		},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create first SSTable: %v", err)
+	}
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "banana",
+			Seq: 2,
+			Entry: record.Entry{
+				Value: []byte("yellow"),
+			},
+		},
+	}, "data-1.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create second SSTable: %v", err)
+	}
+
+	database.sstables = []*sstable.SSTable{
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: "data-0.sst",
+		}),
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   1,
+			Path: "data-1.sst",
+		}),
+	}
+
+	if _, err := database.Get("apple"); err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if _, err := database.Get("banana"); err != nil {
+		t.Fatalf("Get banana: %v", err)
+	}
+
+	cache := dbLRUCache(t, database)
+	if _, ok := cache.Get(blockcache.Key{TableID: 0, Offset: 0}); !ok {
+		t.Fatal("expected table 0 offset 0 cache entry")
+	}
+	if _, ok := cache.Get(blockcache.Key{TableID: 1, Offset: 0}); !ok {
+		t.Fatal("expected table 1 offset 0 cache entry")
+	}
+	if cache.Len() != 2 {
+		t.Fatalf("cache Len = %d, want 2", cache.Len())
+	}
+}
+
+func TestCompactionPurgesOldTableCacheEntries(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "apple",
+			Seq: 1,
+			Entry: record.Entry{
+				Value: []byte("red"),
+			},
+		},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create first SSTable: %v", err)
+	}
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "banana",
+			Seq: 2,
+			Entry: record.Entry{
+				Value: []byte("yellow"),
+			},
+		},
+	}, "data-1.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create second SSTable: %v", err)
+	}
+
+	database.sstables = []*sstable.SSTable{
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: "data-0.sst",
+		}),
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   1,
+			Path: "data-1.sst",
+		}),
+	}
+	database.manifest.NextSSTableID = 2
+	database.manifest.SSTables = []manifest.SSTableMetadata{
+		{
+			ID:   0,
+			Path: "data-0.sst",
+		},
+		{
+			ID:   1,
+			Path: "data-1.sst",
+		},
+	}
+
+	if _, err := database.Get("apple"); err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if _, err := database.Get("banana"); err != nil {
+		t.Fatalf("Get banana: %v", err)
+	}
+
+	cache := dbLRUCache(t, database)
+	if _, ok := cache.Get(blockcache.Key{TableID: 0, Offset: 0}); !ok {
+		t.Fatal("expected table 0 cache entry before compaction")
+	}
+	if _, ok := cache.Get(blockcache.Key{TableID: 1, Offset: 0}); !ok {
+		t.Fatal("expected table 1 cache entry before compaction")
+	}
+
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if _, ok := cache.Get(blockcache.Key{TableID: 0, Offset: 0}); ok {
+		t.Fatal("expected table 0 cache entry to be purged")
+	}
+	if _, ok := cache.Get(blockcache.Key{TableID: 1, Offset: 0}); ok {
+		t.Fatal("expected table 1 cache entry to be purged")
+	}
+
+	if len(database.sstables) != 1 || database.sstables[0].ID != 2 {
+		t.Fatalf("compacted SSTables = %+v, want one table with ID 2", database.sstables)
+	}
+
+	got, err := database.Get("banana")
+	if err != nil {
+		t.Fatalf("Get banana after compaction: %v", err)
+	}
+	if string(got) != "yellow" {
+		t.Fatalf("banana = %q, want yellow", got)
+	}
+
+	if _, ok := cache.Get(blockcache.Key{TableID: 2, Offset: 0}); !ok {
+		t.Fatal("expected compacted table cache entry")
 	}
 }
 
