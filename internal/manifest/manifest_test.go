@@ -12,9 +12,15 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	want := &Manifest{
 		NextSSTableID:    7,
 		NextWALSegmentID: 4,
-		SSTablePaths: []string{
-			"data-1.sst",
-			"data-5.sst",
+		SSTables: []SSTableMetadata{
+			{
+				ID:   1,
+				Path: "data-1.sst",
+			},
+			{
+				ID:   5,
+				Path: "data-5.sst",
+			},
 		},
 	}
 
@@ -54,10 +60,10 @@ func TestReadMissingManifestReturnsDefaults(t *testing.T) {
 		)
 	}
 
-	if len(got.SSTablePaths) != 0 {
+	if len(got.SSTables) != 0 {
 		t.Fatalf(
-			"SSTablePaths = %v, want empty",
-			got.SSTablePaths,
+			"SSTables = %v, want empty",
+			got.SSTables,
 		)
 	}
 }
@@ -68,10 +74,19 @@ func TestReadAdvancesUnsafeNextSSTableID(t *testing.T) {
 	stored := &Manifest{
 		NextSSTableID:    2,
 		NextWALSegmentID: 0,
-		SSTablePaths: []string{
-			"data-1.sst",
-			"compact-8.sst",
-			"data-4.sst",
+		SSTables: []SSTableMetadata{
+			{
+				ID:   1,
+				Path: "data-1.sst",
+			},
+			{
+				ID:   8,
+				Path: "compact-8.sst",
+			},
+			{
+				ID:   4,
+				Path: "data-4.sst",
+			},
 		},
 	}
 
@@ -98,9 +113,15 @@ func TestReadPreservesAlreadySafeNextSSTableID(t *testing.T) {
 	stored := &Manifest{
 		NextSSTableID:    20,
 		NextWALSegmentID: 3,
-		SSTablePaths: []string{
-			"data-1.sst",
-			"compact-8.sst",
+		SSTables: []SSTableMetadata{
+			{
+				ID:   1,
+				Path: "data-1.sst",
+			},
+			{
+				ID:   8,
+				Path: "compact-8.sst",
+			},
 		},
 	}
 

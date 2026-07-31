@@ -15,22 +15,22 @@ import (
 )
 
 type WAL struct {
-	ID      int
+	ID      uint64
 	file    *os.File
 	Path    string
 	encoder *gob.Encoder
 }
 
 type Segment struct {
-	ID   int
+	ID   uint64
 	Path string
 }
 
-func SegmentPath(id int) string {
+func SegmentPath(id uint64) string {
 	return fmt.Sprintf("wal-%d.log", id)
 }
 
-func NewSegment(id int) (*WAL, error) {
+func NewSegment(id uint64) (*WAL, error) {
 	path := SegmentPath(id)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
@@ -46,7 +46,7 @@ func NewSegment(id int) (*WAL, error) {
 	}, nil
 }
 
-func RemoveSegment(id int) error {
+func RemoveSegment(id uint64) error {
 	err := os.Remove(SegmentPath(id))
 	// file already deleted
 	if os.IsNotExist(err) {
@@ -82,7 +82,7 @@ func ListSegments() ([]Segment, error) {
 	return segments, nil
 }
 
-func parseSegmentID(path string) (int, bool) {
+func parseSegmentID(path string) (uint64, bool) {
 	base := filepath.Base(path)
 
 	if !strings.HasPrefix(base, "wal-") || !strings.HasSuffix(base, ".log") {
@@ -91,7 +91,7 @@ func parseSegmentID(path string) (int, bool) {
 
 	idPart := strings.TrimSuffix(strings.TrimPrefix(base, "wal-"), ".log")
 
-	id, err := strconv.Atoi(idPart)
+	id, err := strconv.ParseUint(idPart, 10, 64)
 	if err != nil {
 		return 0, false
 	}

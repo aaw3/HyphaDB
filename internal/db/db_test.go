@@ -60,12 +60,36 @@ func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
 		t.Fatalf("expected data-0.sst to exist: %v", err)
 	}
 
-	// reopeen the database and check saved values
+	if len(database.manifest.SSTables) != 1 {
+		t.Fatalf("manifest SSTables = %v, want one table", database.manifest.SSTables)
+	}
+
+	if database.manifest.SSTables[0].ID != 0 ||
+		database.manifest.SSTables[0].Path != "data-0.sst" {
+		t.Fatalf(
+			"manifest SSTable metadata = %+v, want {ID:0 Path:data-0.sst}",
+			database.manifest.SSTables[0],
+		)
+	}
+
+	// reopen the database and check saved values
 	reopened, err := New(2, 10)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer reopened.Close()
+
+	if len(reopened.sstables) != 1 {
+		t.Fatalf("reopened SSTables = %d, want 1", len(reopened.sstables))
+	}
+
+	if reopened.sstables[0].ID != 0 || reopened.sstables[0].Path != "data-0.sst" {
+		t.Fatalf(
+			"reopened SSTable metadata = {ID:%d Path:%s}, want {ID:0 Path:data-0.sst}",
+			reopened.sstables[0].ID,
+			reopened.sstables[0].Path,
+		)
+	}
 
 	got, err := reopened.Get("apple")
 	if err != nil {
@@ -121,6 +145,59 @@ func TestConcurrentReadersOfActiveMemtable(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestCompactionPersistsSSTableMetadata(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(2, 2)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put apple: %v", err)
+	}
+	if err := database.Put("banana", []byte("yellow")); err != nil {
+		t.Fatalf("Put banana: %v", err)
+	}
+	if err := database.Put("carrot", []byte("orange")); err != nil {
+		t.Fatalf("Put carrot: %v", err)
+	}
+	if err := database.Put("date", []byte("brown")); err != nil {
+		t.Fatalf("Put date: %v", err)
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(database.manifest.SSTables) != 1 {
+		t.Fatalf("manifest SSTables = %v, want one compacted table", database.manifest.SSTables)
+	}
+
+	table := database.manifest.SSTables[0]
+	if table.ID != 2 || table.Path != "compact-2.sst" {
+		t.Fatalf(
+			"compacted SSTable metadata = %+v, want {ID:2 Path:compact-2.sst}",
+			table,
+		)
+	}
+
+	reopened, err := New(2, 2)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.Get("carrot")
+	if err != nil {
+		t.Fatalf("Get carrot after restart: %v", err)
+	}
+
+	if string(got) != "orange" {
+		t.Fatalf("carrot = %q, want orange", got)
+	}
 }
 
 func TestConcurrentReadsAndWrites(t *testing.T) {

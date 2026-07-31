@@ -3,15 +3,17 @@ package manifest
 import (
 	"encoding/gob"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 type Manifest struct {
-	NextSSTableID    int
-	NextWALSegmentID int
-	SSTablePaths     []string
+	NextSSTableID    uint64
+	NextWALSegmentID uint64
+	SSTables         []SSTableMetadata
+}
+
+type SSTableMetadata struct {
+	ID   uint64
+	Path string
 }
 
 func Read(path string) (*Manifest, error) {
@@ -21,7 +23,7 @@ func Read(path string) (*Manifest, error) {
 			return &Manifest{
 				NextSSTableID:    0,
 				NextWALSegmentID: 0,
-				SSTablePaths:     []string{},
+				SSTables:         []SSTableMetadata{},
 			}, nil
 		}
 		return nil, err
@@ -40,35 +42,19 @@ func Read(path string) (*Manifest, error) {
 }
 
 func ensureSafeNextSSTableID(m *Manifest) {
-	maxID := -1
+	var maxID uint64
+	hasTables := false
 
-	for _, path := range m.SSTablePaths {
-		id, ok := extractSSTableID(path)
-		if ok && id > maxID {
-			maxID = id
+	for _, table := range m.SSTables {
+		if !hasTables || table.ID > maxID {
+			maxID = table.ID
+			hasTables = true
 		}
 	}
 
-	if m.NextSSTableID <= maxID {
+	if hasTables && m.NextSSTableID <= maxID {
 		m.NextSSTableID = maxID + 1
 	}
-}
-
-func extractSSTableID(path string) (int, bool) {
-	base := filepath.Base(path)
-
-	parts := strings.Split(base, "-")
-	if len(parts) != 2 {
-		return 0, false
-	}
-
-	idPart := strings.TrimSuffix(parts[1], ".sst")
-	id, err := strconv.Atoi(idPart)
-	if err != nil {
-		return 0, false
-	}
-
-	return id, true
 }
 
 func Write(path string, manifest *Manifest) error {

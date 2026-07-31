@@ -11,7 +11,7 @@ type MemTable struct {
 
 type ImmutableMemTable struct {
 	MemTable *MemTable
-	WalID    int
+	WalID    uint64
 }
 
 func New() *MemTable {

@@ -64,9 +64,11 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		return nil, err
 	}
 
-	sstables := make([]*sstable.SSTable, 0, len(mf.SSTablePaths))
-	for _, path := range mf.SSTablePaths {
-		sstables = append(sstables, &sstable.SSTable{Path: path})
+	sstables := make([]*sstable.SSTable, 0, len(mf.SSTables))
+	for _, table := range mf.SSTables {
+		sstables = append(sstables, sstable.New(table.Path, sstable.OpenOptions{
+			ID: table.ID,
+		}))
 	}
 
 	sstableMaxSeq, err := maxSeqFromSSTables(sstables)
@@ -114,14 +116,20 @@ func (db *DB) compactLocked() error {
 
 	// write compacted SSTable to MANIFEST file
 
-	oldPaths := db.manifest.SSTablePaths
+	oldTables := db.manifest.SSTables
 	db.manifest.NextSSTableID++
-	db.manifest.SSTablePaths = []string{compactedSSTablePath}
+	compactedSSTable.ID = id
+	db.manifest.SSTables = []manifest.SSTableMetadata{
+		{
+			ID:   compactedSSTable.ID,
+			Path: compactedSSTable.Path,
+		},
+	}
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		// Restore in-memory manifest since persistence failed
 		db.manifest.NextSSTableID--
-		db.manifest.SSTablePaths = oldPaths
+		db.manifest.SSTables = oldTables
 
 		if removeErr := os.Remove(compactedSSTablePath); removeErr != nil &&
 			!os.IsNotExist(removeErr) {
@@ -134,10 +142,10 @@ func (db *DB) compactLocked() error {
 		return err
 	}
 
-	oldTables := db.sstables
+	oldSSTables := db.sstables
 	db.sstables = []*sstable.SSTable{compactedSSTable}
 
-	for _, sst := range oldTables {
+	for _, sst := range oldSSTables {
 		if err := os.Remove(sst.Path); err != nil {
 			log.Printf("failed while deleting old SSTable %s: %v",
 				sst.Path,
@@ -350,10 +358,14 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	if err != nil {
 		return err
 	}
+	sst.ID = id
 
 	db.mu.Lock()
 	db.sstables = append(db.sstables, sst)
-	db.manifest.SSTablePaths = append(db.manifest.SSTablePaths, sstablePath)
+	db.manifest.SSTables = append(db.manifest.SSTables, manifest.SSTableMetadata{
+		ID:   sst.ID,
+		Path: sst.Path,
+	})
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		db.mu.Unlock()

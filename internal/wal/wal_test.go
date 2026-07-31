@@ -126,7 +126,7 @@ func TestWALReplayPreservesTombstone(t *testing.T) {
 func TestListSegmentsReturnsNumericOrder(t *testing.T) {
 	useTempWorkingDirectory(t)
 
-	for _, id := range []int{10, 2, 1} {
+	for _, id := range []uint64{10, 2, 1} {
 		w, err := NewSegment(id)
 		if err != nil {
 			t.Fatalf("NewSegment(%d): %v", id, err)
@@ -142,12 +142,12 @@ func TestListSegmentsReturnsNumericOrder(t *testing.T) {
 		t.Fatalf("ListSegments error: %v", err)
 	}
 
-	got := make([]int, 0, len(segments))
+	got := make([]uint64, 0, len(segments))
 	for _, segment := range segments {
 		got = append(got, segment.ID)
 	}
 
-	want := []int{1, 2, 10}
+	want := []uint64{1, 2, 10}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("segment IDs = %v, want %v", got, want)
