@@ -3,8 +3,15 @@ package db
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
+
+	"github.com/aaw3/hyphadb/internal/manifest"
+	"github.com/aaw3/hyphadb/internal/memtable"
+	"github.com/aaw3/hyphadb/internal/record"
+	"github.com/aaw3/hyphadb/internal/sstable"
 )
 
 func useTempWorkingDirectory(t *testing.T) {
@@ -197,6 +204,159 @@ func TestCompactionPersistsSSTableMetadata(t *testing.T) {
 
 	if string(got) != "orange" {
 		t.Fatalf("carrot = %q, want orange", got)
+	}
+}
+
+func TestFlushManifestWriteFailureRollsBackPublishedState(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put apple: %v", err)
+	}
+
+	imm := &memtable.ImmutableMemTable{
+		MemTable: database.memtable,
+		WalID:    database.wal.ID,
+	}
+	database.immutableMemtables = append(database.immutableMemtables, imm)
+	database.manifestPath = filepath.Join("missing-dir", "MANIFEST")
+
+	if err := database.flushImmutableMemtable(imm); err == nil {
+		t.Fatal("flushImmutableMemtable succeeded, want manifest write failure")
+	}
+
+	if len(database.sstables) != 0 {
+		t.Fatalf("sstables = %d, want 0", len(database.sstables))
+	}
+
+	if len(database.manifest.SSTables) != 0 {
+		t.Fatalf("manifest SSTables = %v, want empty", database.manifest.SSTables)
+	}
+
+	if database.manifest.NextSSTableID != 0 {
+		t.Fatalf(
+			"NextSSTableID = %d, want 0",
+			database.manifest.NextSSTableID,
+		)
+	}
+
+	if _, err := os.Stat("data-0.sst"); !os.IsNotExist(err) {
+		t.Fatalf("data-0.sst should be removed after failed flush, got err=%v", err)
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple after failed flush: %v", err)
+	}
+
+	if string(got) != "red" {
+		t.Fatalf("apple = %q, want red", got)
+	}
+}
+
+func TestCompactionManifestWriteFailureRollsBackPublishedState(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	oldTable, err := sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "apple",
+			Seq: 1,
+			Entry: record.Entry{
+				Value: []byte("red"),
+			},
+		},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create old SSTable: %v", err)
+	}
+	oldTable.ID = 0
+
+	newTable, err := sstable.CreateFromRecords([]record.Record{
+		{
+			Key: "banana",
+			Seq: 2,
+			Entry: record.Entry{
+				Value: []byte("yellow"),
+			},
+		},
+	}, "data-1.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create new SSTable: %v", err)
+	}
+	newTable.ID = 1
+
+	database.sstables = []*sstable.SSTable{oldTable, newTable}
+	database.manifest.NextSSTableID = 2
+	database.manifest.SSTables = []manifest.SSTableMetadata{
+		{
+			ID:   oldTable.ID,
+			Path: oldTable.Path,
+		},
+		{
+			ID:   newTable.ID,
+			Path: newTable.Path,
+		},
+	}
+	database.manifestPath = filepath.Join("missing-dir", "MANIFEST")
+
+	if err := database.Compact(); err == nil {
+		t.Fatal("Compact succeeded, want manifest write failure")
+	}
+
+	if len(database.sstables) != 2 ||
+		database.sstables[0] != oldTable ||
+		database.sstables[1] != newTable {
+		t.Fatalf("sstables changed after failed compaction: %v", database.sstables)
+	}
+
+	if database.manifest.NextSSTableID != 2 {
+		t.Fatalf(
+			"NextSSTableID = %d, want 2",
+			database.manifest.NextSSTableID,
+		)
+	}
+
+	wantMetadata := []manifest.SSTableMetadata{
+		{
+			ID:   oldTable.ID,
+			Path: oldTable.Path,
+		},
+		{
+			ID:   newTable.ID,
+			Path: newTable.Path,
+		},
+	}
+	if !reflect.DeepEqual(database.manifest.SSTables, wantMetadata) {
+		t.Fatalf(
+			"manifest SSTables = %+v, want %+v",
+			database.manifest.SSTables,
+			wantMetadata,
+		)
+	}
+
+	if _, err := os.Stat("compact-2.sst"); !os.IsNotExist(err) {
+		t.Fatalf("compact-2.sst should be removed after failed compaction, got err=%v", err)
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple after failed compaction: %v", err)
+	}
+
+	if string(got) != "red" {
+		t.Fatalf("apple = %q, want red", got)
 	}
 }
 

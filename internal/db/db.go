@@ -116,6 +116,7 @@ func (db *DB) compactLocked() error {
 
 	// write compacted SSTable to MANIFEST file
 
+	oldNextSSTableID := db.manifest.NextSSTableID
 	oldTables := db.manifest.SSTables
 	db.manifest.NextSSTableID++
 	compactedSSTable.ID = id
@@ -128,7 +129,7 @@ func (db *DB) compactLocked() error {
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		// Restore in-memory manifest since persistence failed
-		db.manifest.NextSSTableID--
+		db.manifest.NextSSTableID = oldNextSSTableID
 		db.manifest.SSTables = oldTables
 
 		if removeErr := os.Remove(compactedSSTablePath); removeErr != nil &&
@@ -351,16 +352,23 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	db.mu.Lock()
 	id := db.manifest.NextSSTableID
 	sstablePath := fmt.Sprintf("data-%d.sst", id)
+	oldNextSSTableID := db.manifest.NextSSTableID
 	db.manifest.NextSSTableID++
 	db.mu.Unlock()
 
 	sst, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
 	if err != nil {
+		db.mu.Lock()
+		db.manifest.NextSSTableID = oldNextSSTableID
+		db.mu.Unlock()
 		return err
 	}
 	sst.ID = id
 
 	db.mu.Lock()
+	oldSSTableCount := len(db.sstables)
+	oldMetadataCount := len(db.manifest.SSTables)
+
 	db.sstables = append(db.sstables, sst)
 	db.manifest.SSTables = append(db.manifest.SSTables, manifest.SSTableMetadata{
 		ID:   sst.ID,
@@ -368,7 +376,20 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	})
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+		db.sstables = db.sstables[:oldSSTableCount]
+		db.manifest.SSTables = db.manifest.SSTables[:oldMetadataCount]
+		db.manifest.NextSSTableID = oldNextSSTableID
 		db.mu.Unlock()
+
+		if removeErr := os.Remove(sstablePath); removeErr != nil &&
+			!os.IsNotExist(removeErr) {
+			log.Printf(
+				"failed to remove orphaned SSTable %s: %v",
+				sstablePath,
+				removeErr,
+			)
+		}
+
 		return err
 	}
 
