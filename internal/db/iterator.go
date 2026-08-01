@@ -89,6 +89,16 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 	heap.Init(&it.heap)
 
 	for i := range it.sources {
+		if opts.Start != "" {
+			if seeker, ok := it.sources[i].(record.SeekableIterator); ok {
+				if err := seeker.Seek(opts.Start); err != nil {
+					it.closeSources()
+					db.mu.RUnlock()
+					return nil, err
+				}
+			}
+		}
+
 		// Prime the merge heap with the first in-range record from each source.
 		if err := it.advanceSource(i); err != nil {
 			it.closeSources()
@@ -157,8 +167,9 @@ func (it *Iterator) Close() error {
 	return err
 }
 
-// advanceSource moves one source iterator forward until it finds the next
-// record inside the requested range, then pushes that record into the merge heap.
+// advanceSource moves one source iterator forward until it finds the next record
+// inside the requested range, then pushes that record into the merge heap. When
+// available, NewIterator seeks sources to Start before this function runs
 func (it *Iterator) advanceSource(sourceIndex int) error {
 	source := it.sources[sourceIndex]
 

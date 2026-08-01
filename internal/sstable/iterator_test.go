@@ -132,6 +132,77 @@ func TestCompressedSSTableIterator(t *testing.T) {
 	}
 }
 
+func TestIteratorSeekStartsAtLowerBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seek.sst")
+	records := []record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+		{Key: "banana", Seq: 2, Entry: record.Entry{Value: []byte("yellow")}},
+		{Key: "carrot", Seq: 3, Entry: record.Entry{Value: []byte("orange")}},
+		{Key: "date", Seq: 4, Entry: record.Entry{Value: []byte("brown")}},
+		{Key: "fig", Seq: 5, Entry: record.Entry{Value: []byte("purple")}},
+	}
+
+	sst, err := CreateFromRecords(records, path, 32)
+	if err != nil {
+		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+
+	it, err := sst.Iterator()
+	if err != nil {
+		t.Fatalf("Iterator failed: %v", err)
+	}
+	defer it.Close()
+
+	if err := it.Seek("coconut"); err != nil {
+		t.Fatalf("Seek error: %v", err)
+	}
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Record().Key)
+	}
+
+	if err := it.Err(); err != nil {
+		t.Fatalf("Iterator returned error: %v", err)
+	}
+
+	want := []string{"date", "fig"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys = %v, want %v", got, want)
+	}
+}
+
+func TestIteratorSeekPastLastKeyReturnsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seek-past-last.sst")
+	records := []record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+		{Key: "banana", Seq: 2, Entry: record.Entry{Value: []byte("yellow")}},
+	}
+
+	sst, err := CreateFromRecords(records, path, 32)
+	if err != nil {
+		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+
+	it, err := sst.Iterator()
+	if err != nil {
+		t.Fatalf("Iterator failed: %v", err)
+	}
+	defer it.Close()
+
+	if err := it.Seek("zebra"); err != nil {
+		t.Fatalf("Seek error: %v", err)
+	}
+
+	if it.Next() {
+		t.Fatalf("Next returned key %q, want false", it.Record().Key)
+	}
+
+	if err := it.Err(); err != nil {
+		t.Fatalf("Iterator returned error: %v", err)
+	}
+}
+
 func TestCompressedSSTableMaxSeq(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "compressed.sst")
 

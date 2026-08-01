@@ -3,13 +3,19 @@ package skiplist
 import "github.com/aaw3/hyphadb/internal/record"
 
 type Iterator struct {
+	list    *SkipList
 	current *node
 }
 
 func (s *SkipList) Iterator() *Iterator {
 	return &Iterator{
+		list:    s,
 		current: s.head.next[0],
 	}
+}
+
+func (it *Iterator) Seek(key string) {
+	it.current = it.list.lowerBound(key)
 }
 
 func (it *Iterator) Valid() bool {

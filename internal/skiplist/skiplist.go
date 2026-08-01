@@ -113,17 +113,7 @@ func (s *SkipList) Put(rec record.Record) {
 }
 
 func (s *SkipList) Get(key string) (record.Record, bool) {
-	x := s.head
-
-	// search for the key starting from the top level
-	for i := s.level - 1; i >= 0; i-- {
-		for x.next[i] != nil && x.next[i].key < key {
-			x = x.next[i]
-		}
-	}
-
-	// move to the bottom level to check if the key exists, if it does, return the record
-	x = x.next[0]
+	x := s.lowerBound(key)
 	if x != nil && x.key == key {
 		return x.record, true
 	}
@@ -132,4 +122,16 @@ func (s *SkipList) Get(key string) (record.Record, bool) {
 
 func (s *SkipList) Len() int {
 	return s.count
+}
+
+func (s *SkipList) lowerBound(key string) *node {
+	x := s.head
+
+	for i := s.level - 1; i >= 0; i-- {
+		for x.next[i] != nil && x.next[i].key < key {
+			x = x.next[i]
+		}
+	}
+
+	return x.next[0]
 }

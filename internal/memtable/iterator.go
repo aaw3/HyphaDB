@@ -12,11 +12,17 @@ type Iterator struct {
 
 // Compile-time check that *Iterator satisfies the shared record iterator API.
 var _ record.Iterator = (*Iterator)(nil)
+var _ record.SeekableIterator = (*Iterator)(nil)
 
 func (m *MemTable) Iterator() *Iterator {
 	return &Iterator{
 		it: m.data.Iterator(),
 	}
+}
+
+func (it *Iterator) Seek(key string) error {
+	it.it.Seek(key)
+	return nil
 }
 
 func (it *Iterator) Next() bool {

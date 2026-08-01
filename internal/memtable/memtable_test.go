@@ -163,6 +163,29 @@ func TestMemTableIteratorCloseIsNoOp(t *testing.T) {
 	}
 }
 
+func TestMemTableIteratorSeekStartsAtLowerBound(t *testing.T) {
+	mt := New()
+
+	mt.Put(record.Record{Key: "apple", Seq: 1})
+	mt.Put(record.Record{Key: "banana", Seq: 2})
+	mt.Put(record.Record{Key: "date", Seq: 3})
+
+	it := mt.Iterator()
+	defer it.Close()
+
+	if err := it.Seek("carrot"); err != nil {
+		t.Fatalf("Seek error: %v", err)
+	}
+
+	if !it.Next() {
+		t.Fatal("Next returned false, want date")
+	}
+
+	if got := it.Record().Key; got != "date" {
+		t.Fatalf("key = %q, want date", got)
+	}
+}
+
 func TestMemTableLenCountsUniqueKeys(t *testing.T) {
 	mt := New()
 

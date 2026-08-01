@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"os"
+	"sort"
 
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -19,6 +20,7 @@ type Iterator struct {
 
 // Compile-time check that *Iterator satisfies the shared record iterator API.
 var _ record.Iterator = (*Iterator)(nil)
+var _ record.SeekableIterator = (*Iterator)(nil)
 
 func (s *SSTable) Iterator() (*Iterator, error) {
 	if err := s.loadMetadata(); err != nil {
@@ -43,6 +45,42 @@ func (s *SSTable) Iterator() (*Iterator, error) {
 	}, nil
 }
 
+func (it *Iterator) Seek(key string) error {
+	if it.err != nil {
+		return it.err
+	}
+
+	it.blockRecords = nil
+	it.recordIndex = -1
+
+	if len(it.index) == 0 {
+		it.blockIndex = 0
+		return nil
+	}
+
+	blockIndex := sort.Search(len(it.index), func(i int) bool {
+		return it.index[i].FirstKey > key
+	}) - 1
+	if blockIndex < 0 {
+		blockIndex = 0
+	}
+
+	if err := it.loadBlock(blockIndex); err != nil {
+		return err
+	}
+
+	recordIndex := sort.Search(len(it.blockRecords), func(i int) bool {
+		return it.blockRecords[i].Key >= key
+	})
+	if recordIndex < len(it.blockRecords) {
+		it.recordIndex = recordIndex - 1
+		return nil
+	}
+
+	it.recordIndex = len(it.blockRecords) - 1
+	return nil
+}
+
 func (it *Iterator) Next() bool {
 	if it.err != nil {
 		return false
@@ -62,22 +100,11 @@ func (it *Iterator) Next() bool {
 		return false
 	}
 
-	// read the next block from the SSTable file
-	logical, err := it.sst.readLogicalBlockFrom(it.file, it.index[it.blockIndex])
-	if err != nil {
+	if err := it.loadBlock(it.blockIndex); err != nil {
 		it.err = err
 		return false
 	}
 
-	// decode the logical block into records
-	records, err := decodeLogicalBlock(logical)
-	if err != nil {
-		it.err = err
-		return false
-	}
-
-	// reset the record index and set the current block records
-	it.blockRecords = records
 	it.recordIndex = 0
 
 	// if the block has no records, move to the next block
@@ -87,6 +114,24 @@ func (it *Iterator) Next() bool {
 
 	it.current = it.blockRecords[it.recordIndex]
 	return true
+}
+
+func (it *Iterator) loadBlock(blockIndex int) error {
+	logical, err := it.sst.readLogicalBlockFrom(it.file, it.index[blockIndex])
+	if err != nil {
+		it.err = err
+		return err
+	}
+
+	records, err := decodeLogicalBlock(logical)
+	if err != nil {
+		it.err = err
+		return err
+	}
+
+	it.blockIndex = blockIndex
+	it.blockRecords = records
+	return nil
 }
 
 func (it *Iterator) Record() record.Record {
