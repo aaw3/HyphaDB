@@ -147,6 +147,67 @@ func TestIteratorSuppressesHighestSequenceTombstone(t *testing.T) {
 	}
 }
 
+func TestIteratorCollapsesDuplicateKeysToHighestSequence(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	tablePath := "data-0.sst"
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red-old")}},
+	}, tablePath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords: %v", err)
+	}
+
+	imm := memtable.New()
+	imm.Put(record.Record{
+		Key: "apple",
+		Seq: 5,
+		Entry: record.Entry{
+			Value: []byte("red-imm"),
+		},
+	})
+
+	database.immutableMemtables = append(
+		database.immutableMemtables,
+		&memtable.ImmutableMemTable{
+			MemTable: imm,
+		},
+	)
+	database.sstables = append(
+		database.sstables,
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: tablePath,
+		}),
+	)
+	database.memtable.Put(record.Record{
+		Key: "apple",
+		Seq: 9,
+		Entry: record.Entry{
+			Value: []byte("red-active"),
+		},
+	})
+
+	it, err := database.NewIterator(IteratorOptions{})
+	if err != nil {
+		t.Fatalf("NewIterator: %v", err)
+	}
+	defer it.Close()
+
+	got := collectIteratorKeyValues(t, it)
+	want := []string{"apple=red-active"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("records = %v, want %v", got, want)
+	}
+}
+
 func TestIteratorReturnsErrClosed(t *testing.T) {
 	useTempWorkingDirectory(t)
 

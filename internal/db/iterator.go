@@ -15,7 +15,7 @@ type Iterator struct {
 	db      *DB
 	opts    IteratorOptions
 	sources []record.Iterator
-	heap    iteratorHeap
+	heap    mergeHeap
 	current record.Record
 	err     error
 	closed  bool
@@ -24,30 +24,34 @@ type Iterator struct {
 // Compile-time check that *Iterator satisfies the shared record iterator API.
 var _ record.Iterator = (*Iterator)(nil)
 
-type iteratorItem struct {
+type mergeItem struct {
 	record      record.Record
 	sourceIndex int
 }
 
-type iteratorHeap []*iteratorItem
+type mergeHeap []*mergeItem
 
-func (h iteratorHeap) Len() int {
+func (h mergeHeap) Len() int {
 	return len(h)
 }
 
-func (h iteratorHeap) Less(i, j int) bool {
-	return h[i].record.Key < h[j].record.Key
+func (h mergeHeap) Less(i, j int) bool {
+	if h[i].record.Key != h[j].record.Key {
+		return h[i].record.Key < h[j].record.Key
+	}
+
+	return h[i].record.Seq > h[j].record.Seq
 }
 
-func (h iteratorHeap) Swap(i, j int) {
+func (h mergeHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 }
 
-func (h *iteratorHeap) Push(x any) {
-	*h = append(*h, x.(*iteratorItem))
+func (h *mergeHeap) Push(x any) {
+	*h = append(*h, x.(*mergeItem))
 }
 
-func (h *iteratorHeap) Pop() any {
+func (h *mergeHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
@@ -116,7 +120,7 @@ func (it *Iterator) Next() bool {
 	}
 
 	for it.heap.Len() > 0 {
-		item := heap.Pop(&it.heap).(*iteratorItem)
+		item := heap.Pop(&it.heap).(*mergeItem)
 		key := item.record.Key
 		best := item.record
 
@@ -126,7 +130,7 @@ func (it *Iterator) Next() bool {
 		}
 
 		for it.heap.Len() > 0 && it.heap[0].record.Key == key {
-			item = heap.Pop(&it.heap).(*iteratorItem)
+			item = heap.Pop(&it.heap).(*mergeItem)
 			if item.record.Seq > best.Seq {
 				best = item.record
 			}
@@ -169,7 +173,7 @@ func (it *Iterator) Close() error {
 
 // advanceSource moves one source iterator forward until it finds the next record
 // inside the requested range, then pushes that record into the merge heap. When
-// available, NewIterator seeks sources to Start before this function runs
+// available, NewIterator seeks sources to Start before this function runs.
 func (it *Iterator) advanceSource(sourceIndex int) error {
 	source := it.sources[sourceIndex]
 
@@ -185,7 +189,7 @@ func (it *Iterator) advanceSource(sourceIndex int) error {
 			return nil
 		}
 
-		heap.Push(&it.heap, &iteratorItem{
+		heap.Push(&it.heap, &mergeItem{
 			record:      rec,
 			sourceIndex: sourceIndex,
 		})
