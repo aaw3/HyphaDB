@@ -145,13 +145,13 @@ func TestBloomFilteredLookupAfterReopen(t *testing.T) {
 		Path: path,
 	}
 
-	got, err := reopened.Open("banana")
+	got, err := reopened.Get("banana")
 	if err != nil {
-		t.Fatalf("Open banana: %v", err)
+		t.Fatalf("Get banana: %v", err)
 	}
 
 	if string(got) != "yellow" {
-		t.Fatalf("Open banana = %q, want %q", got, "yellow")
+		t.Fatalf("Get banana = %q, want %q", got, "yellow")
 	}
 }
 
@@ -184,9 +184,9 @@ func TestBloomFilteredLookupMissingKey(t *testing.T) {
 		t.Fatalf("CreateFromRecordsWithOptions: %v", err)
 	}
 
-	_, err = table.Open("grape")
+	_, err = table.Get("grape")
 	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Open missing key error = %v, want ErrNotFound", err)
+		t.Fatalf("Get missing key error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -232,9 +232,9 @@ func TestBloomFilterIncludesTombstones(t *testing.T) {
 		t.Fatal("Bloom filter returned false negative for tombstone")
 	}
 
-	_, err = reopened.Open("deleted-key")
+	_, err = reopened.Get("deleted-key")
 	if !errors.Is(err, ErrDeleted) {
-		t.Fatalf("Open tombstone error = %v, want ErrDeleted", err)
+		t.Fatalf("Get tombstone error = %v, want ErrDeleted", err)
 	}
 }
 
@@ -275,13 +275,13 @@ func TestBloomFilterCanBeDisabled(t *testing.T) {
 		t.Fatal("Bloom filter is non-nil when Bloom filtering is disabled")
 	}
 
-	got, err := reopened.Open("apple")
+	got, err := reopened.Get("apple")
 	if err != nil {
-		t.Fatalf("Open apple: %v", err)
+		t.Fatalf("Get apple: %v", err)
 	}
 
 	if string(got) != "red" {
-		t.Fatalf("Open apple = %q, want red", got)
+		t.Fatalf("Get apple = %q, want red", got)
 	}
 }
 
@@ -313,9 +313,9 @@ func TestEmptySSTableHasNoBloomFilter(t *testing.T) {
 		t.Fatal("empty SSTable unexpectedly has Bloom filter")
 	}
 
-	_, err = reopened.Open("anything")
+	_, err = reopened.Get("anything")
 	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Open empty table error = %v, want ErrNotFound", err)
+		t.Fatalf("Get empty table error = %v, want ErrNotFound", err)
 	}
 }
 

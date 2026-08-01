@@ -202,7 +202,7 @@ func (db *DB) Get(key string) ([]byte, error) {
 
 	// Check SSTables in reverse order (newest to oldest)
 	for i := len(db.sstables) - 1; i >= 0; i-- {
-		val, err := db.sstables[i].Open(key)
+		val, err := db.sstables[i].Get(key)
 		switch {
 		case err == nil:
 			return val, nil

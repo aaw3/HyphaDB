@@ -40,7 +40,7 @@ func New(path string, opts OpenOptions) *SSTable {
 	}
 }
 
-func (s *SSTable) Open(key string) ([]byte, error) {
+func (s *SSTable) Get(key string) ([]byte, error) {
 	if err := s.loadMetadata(); err != nil {
 		return nil, err
 	}

@@ -43,9 +43,9 @@ func TestCompressedSSTableRoundTrip(t *testing.T) {
 		t.Fatalf("CreateFromRecordsWithOptions error: %v", err)
 	}
 
-	got, err := sst.Open("banana")
+	got, err := sst.Get("banana")
 	if err != nil {
-		t.Fatalf("Open banana: %v", err)
+		t.Fatalf("Get banana: %v", err)
 	}
 
 	if !bytes.Equal(got, records[1].Value) {

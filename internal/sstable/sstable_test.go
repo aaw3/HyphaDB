@@ -9,7 +9,7 @@ import (
 	"github.com/aaw3/hyphadb/internal/record"
 )
 
-func TestCreateFromRecordAndOpen(t *testing.T) {
+func TestCreateFromRecordAndGet(t *testing.T) {
 	path := t.TempDir() + "/test_sstable.sst"
 	records := []record.Record{
 		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
@@ -22,17 +22,17 @@ func TestCreateFromRecordAndOpen(t *testing.T) {
 		t.Fatalf("CreateFromRecords failed: %v", err)
 	}
 
-	got, err := sst.Open("banana")
+	got, err := sst.Get("banana")
 	if err != nil {
-		t.Fatalf("Open failed: %v", err)
+		t.Fatalf("Get failed: %v", err)
 	}
 
 	if string(got) != "yellow" {
-		t.Fatalf("Open returned wrong value: got %q, want %q", got, "yellow")
+		t.Fatalf("Get returned wrong value: got %q, want %q", got, "yellow")
 	}
 }
 
-func TestOpenMissingKeyReturnsErrNotFound(t *testing.T) {
+func TestGetMissingKeyReturnsErrNotFound(t *testing.T) {
 	path := t.TempDir() + "/test_sstable_missing_key.sst"
 	records := []record.Record{
 		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
@@ -45,14 +45,14 @@ func TestOpenMissingKeyReturnsErrNotFound(t *testing.T) {
 	}
 
 	for _, key := range []string{"carrot", "date", "eggplant"} {
-		_, err := sst.Open(key)
+		_, err := sst.Get(key)
 		if !errors.Is(err, ErrNotFound) {
-			t.Fatalf("Open for missing key %q returned wrong error: got %v, want %v", key, err, ErrNotFound)
+			t.Fatalf("Get for missing key %q returned wrong error: got %v, want %v", key, err, ErrNotFound)
 		}
 	}
 }
 
-func TestOpenDeleteKeyReturnsErrDeleted(t *testing.T) {
+func TestGetDeleteKeyReturnsErrDeleted(t *testing.T) {
 	path := t.TempDir() + "/test_sstable_deleted_key.sst"
 	records := []record.Record{
 		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
@@ -65,9 +65,9 @@ func TestOpenDeleteKeyReturnsErrDeleted(t *testing.T) {
 		t.Fatalf("CreateFromRecords failed: %v", err)
 	}
 
-	_, err = sst.Open("carrot")
+	_, err = sst.Get("carrot")
 	if !errors.Is(err, ErrDeleted) {
-		t.Fatalf("Open for deleted key returned wrong error: got %v, want %v", err, ErrDeleted)
+		t.Fatalf("Get for deleted key returned wrong error: got %v, want %v", err, ErrDeleted)
 	}
 }
 
@@ -89,13 +89,13 @@ func TestCreateFromRecordsWithTinyBlockSize(t *testing.T) {
 		t.Fatalf("Expected multiple blocks for tiny block size, got %d", len(sst.index))
 	}
 
-	got, err := sst.Open("dragonfruit")
+	got, err := sst.Get("dragonfruit")
 	if err != nil {
-		t.Fatalf("Open failed: %v", err)
+		t.Fatalf("Get failed: %v", err)
 	}
 
 	if string(got) != "pink" {
-		t.Fatalf("Open returned wrong value: got %q, want %q", got, "pink")
+		t.Fatalf("Get returned wrong value: got %q, want %q", got, "pink")
 	}
 }
 
@@ -131,10 +131,10 @@ func TestConcurrentMissingKeyReads(t *testing.T) {
 					defer wg.Done()
 
 					for j := 0; j < 100; j++ {
-						_, err := sst.Open(key)
+						_, err := sst.Get(key)
 						if !errors.Is(err, ErrNotFound) {
 							t.Errorf(
-								"Open(%q) error = %v, want %v",
+								"Get(%q) error = %v, want %v",
 								key,
 								err,
 								ErrNotFound,

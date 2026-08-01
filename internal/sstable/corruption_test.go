@@ -78,7 +78,7 @@ func TestCompressedSSTableCorruptionReturnsErrCorrupt(t *testing.T) {
 
 	reopened := &SSTable{Path: path}
 
-	_, err = reopened.Open("apple")
+	_, err = reopened.Get("apple")
 	if !errors.Is(err, ErrCorruptSSTable) {
 		t.Fatalf("error = %v, want %v",
 			err,

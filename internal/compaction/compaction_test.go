@@ -65,14 +65,14 @@ func TestMergeSSTablesKeepsNewestValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
-			got, err := merged.Open(tt.key)
+			got, err := merged.Get(tt.key)
 			if err != nil {
-				t.Fatalf("Open(%q): %v", tt.key, err)
+				t.Fatalf("Get(%q): %v", tt.key, err)
 			}
 
 			if string(got) != tt.want {
 				t.Fatalf(
-					"Open(%q) = %q, want %q",
+					"Get(%q) = %q, want %q",
 					tt.key,
 					got,
 					tt.want,
@@ -114,17 +114,17 @@ func TestMergeSSTablesDropsDeletedKey(t *testing.T) {
 		t.Fatalf("MergeSSTables failed: %v", err)
 	}
 
-	got, err := merged.Open("apple")
+	got, err := merged.Get("apple")
 	if err != nil {
-		t.Fatalf("Open(a): %v", err)
+		t.Fatalf("Get(a): %v", err)
 	}
 	if string(got) != "red" {
-		t.Fatalf("Open(a) = %q, want red", got)
+		t.Fatalf("Get(a) = %q, want red", got)
 	}
 
-	_, err = merged.Open("banana")
+	_, err = merged.Get("banana")
 	if !errors.Is(err, sstable.ErrNotFound) {
-		t.Fatalf("Open(b) error = %v, want %v",
+		t.Fatalf("Get(b) error = %v, want %v",
 			err,
 			sstable.ErrNotFound,
 		)
