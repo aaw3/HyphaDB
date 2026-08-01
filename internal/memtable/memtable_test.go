@@ -121,3 +121,56 @@ func TestMemTableRecordsAreSorted(t *testing.T) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
 }
+
+func TestMemTableIteratorReturnsSortedRecords(t *testing.T) {
+	mt := New()
+
+	mt.Put(record.Record{Key: "date", Seq: 4})
+	mt.Put(record.Record{Key: "apple", Seq: 1})
+	mt.Put(record.Record{Key: "cherry", Seq: 3})
+	mt.Put(record.Record{Key: "banana", Seq: 2})
+
+	it := mt.Iterator()
+	defer it.Close()
+
+	var got []string
+	for it.Next() {
+		got = append(got, it.Record().Key)
+	}
+
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+
+	want := []string{
+		"apple",
+		"banana",
+		"cherry",
+		"date",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys = %v, want %v", got, want)
+	}
+}
+
+func TestMemTableIteratorCloseIsNoOp(t *testing.T) {
+	mt := New()
+	it := mt.Iterator()
+
+	if err := it.Close(); err != nil {
+		t.Fatalf("Close error = %v, want nil", err)
+	}
+}
+
+func TestMemTableLenCountsUniqueKeys(t *testing.T) {
+	mt := New()
+
+	mt.Put(record.Record{Key: "apple", Seq: 1})
+	mt.Put(record.Record{Key: "apple", Seq: 2})
+	mt.Put(record.Record{Key: "banana", Seq: 3})
+
+	if got := mt.Len(); got != 2 {
+		t.Fatalf("Len = %d, want 2", got)
+	}
+}

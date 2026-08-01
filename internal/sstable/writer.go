@@ -13,7 +13,10 @@ import (
 )
 
 func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
-	return CreateFromRecordsWithOptions(mt.Records(), path, DefaultWriteOptions())
+	it := mt.Iterator()
+	defer it.Close()
+
+	return CreateFromIteratorWithOptions(it, mt.Len(), path, DefaultWriteOptions())
 }
 
 func CreateFromRecords(
@@ -32,6 +35,20 @@ func CreateFromRecordsWithOptions(
 	path string,
 	opts WriteOptions,
 ) (*SSTable, error) {
+	return CreateFromIteratorWithOptions(
+		newSliceIterator(records),
+		len(records),
+		path,
+		opts,
+	)
+}
+
+func CreateFromIteratorWithOptions(
+	it record.Iterator,
+	recordCountHint int,
+	path string,
+	opts WriteOptions,
+) (*SSTable, error) {
 	opts, err := normalizeWriteOptions(opts)
 	if err != nil {
 		return nil, err
@@ -39,10 +56,10 @@ func CreateFromRecordsWithOptions(
 
 	var filter *bloom.Filter
 
-	bloomFilterEnabled := opts.Bloom.Enabled && len(records) > 0
+	bloomFilterEnabled := opts.Bloom.Enabled && recordCountHint > 0
 
 	if bloomFilterEnabled {
-		filter, err = bloom.New(len(records), opts.Bloom.FalsePositiveRate)
+		filter, err = bloom.New(recordCountHint, opts.Bloom.FalsePositiveRate)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create bloom filter: %w", err)
 		}
@@ -58,6 +75,8 @@ func CreateFromRecordsWithOptions(
 	var logicalBlock bytes.Buffer
 	var recordCount int
 	var blockFirstKey string
+	var previousKey string
+	firstRecord := true
 
 	// closure to start a new block
 	startBlock := func(firstKey string) {
@@ -109,15 +128,19 @@ func CreateFromRecordsWithOptions(
 		return nil
 	}
 
-	for i, rec := range records {
-		if i > 0 && records[i-1].Key > rec.Key {
+	for it.Next() {
+		rec := it.Record()
+
+		if !firstRecord && previousKey > rec.Key {
 			return nil, fmt.Errorf(
 				"%w: key %q appears before %q",
 				ErrUnsortedRecords,
-				records[i-1].Key,
+				previousKey,
 				rec.Key,
 			)
 		}
+		previousKey = rec.Key
+		firstRecord = false
 
 		if bloomFilterEnabled {
 			filter.Add([]byte(rec.Key))
@@ -142,6 +165,10 @@ func CreateFromRecordsWithOptions(
 			return nil, err
 		}
 		recordCount++
+	}
+
+	if err := it.Err(); err != nil {
+		return nil, err
 	}
 
 	if err := flushBlock(); err != nil {
@@ -219,4 +246,39 @@ func CreateFromRecordsWithOptions(
 		index:  index,
 		filter: filter,
 	}, nil
+}
+
+type sliceIterator struct {
+	records []record.Record
+	index   int
+	current record.Record
+}
+
+func newSliceIterator(records []record.Record) *sliceIterator {
+	return &sliceIterator{
+		records: records,
+		index:   -1,
+	}
+}
+
+func (it *sliceIterator) Next() bool {
+	it.index++
+	if it.index >= len(it.records) {
+		return false
+	}
+
+	it.current = it.records[it.index]
+	return true
+}
+
+func (it *sliceIterator) Record() record.Record {
+	return it.current
+}
+
+func (it *sliceIterator) Err() error {
+	return nil
+}
+
+func (it *sliceIterator) Close() error {
+	return nil
 }

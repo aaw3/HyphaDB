@@ -34,6 +34,19 @@ func (m *MemTable) Put(rec record.Record) {
 	m.data.Put(rec)
 }
 
+func (m *MemTable) Len() int {
+	return m.data.Len()
+}
+
 func (m *MemTable) Records() []record.Record {
-	return m.data.Records()
+	var records []record.Record
+
+	it := m.Iterator()
+	defer it.Close()
+
+	for it.Next() {
+		records = append(records, it.Record())
+	}
+
+	return records
 }

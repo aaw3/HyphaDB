@@ -17,6 +17,9 @@ type Iterator struct {
 	err          error
 }
 
+// Compile-time check that *Iterator satisfies the shared record iterator API.
+var _ record.Iterator = (*Iterator)(nil)
+
 func (s *SSTable) Iterator() (*Iterator, error) {
 	if err := s.loadMetadata(); err != nil {
 		return nil, err

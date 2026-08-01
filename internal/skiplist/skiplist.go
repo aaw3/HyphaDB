@@ -12,6 +12,7 @@ type SkipList struct {
 	level    int
 	maxLevel int
 	rng      *rand.Rand // use a per-instance rng for better randomness
+	count    int
 }
 
 const defaultMaxLevel = 16
@@ -107,6 +108,8 @@ func (s *SkipList) Put(rec record.Record) {
 		newNode.next[i] = update[i].next[i]
 		update[i].next[i] = newNode
 	}
+
+	s.count++
 }
 
 func (s *SkipList) Get(key string) (record.Record, bool) {
@@ -125,4 +128,8 @@ func (s *SkipList) Get(key string) (record.Record, bool) {
 		return x.record, true
 	}
 	return record.Record{}, false
+}
+
+func (s *SkipList) Len() int {
+	return s.count
 }

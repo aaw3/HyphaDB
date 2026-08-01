@@ -73,7 +73,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	database := &DB{
 		memtable:            mt,
 		maxMemtableSize:     maxMemtableSize,
-		memTableSize:        len(mt.Records()),
+		memTableSize:        mt.Len(),
 		sstables:            make([]*sstable.SSTable, 0, len(mf.SSTables)),
 		blockCache:          cache,
 		wal:                 w,
@@ -457,7 +457,11 @@ func (db *DB) Close() error {
 func maxSeqFromMemTable(mt *memtable.MemTable) uint64 {
 	var maxSeq uint64
 
-	for _, rec := range mt.Records() {
+	it := mt.Iterator()
+	defer it.Close()
+
+	for it.Next() {
+		rec := it.Record()
 		if rec.Seq > maxSeq {
 			maxSeq = rec.Seq
 		}
