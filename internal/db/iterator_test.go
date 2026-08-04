@@ -103,6 +103,113 @@ func TestIteratorMergesSourcesAndAppliesRange(t *testing.T) {
 	}
 }
 
+func TestIteratorRangeBoundsCanBeUnbounded(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	for i, key := range []string{"apple", "banana", "carrot", "date"} {
+		database.memtable.Put(record.Record{
+			Key: key,
+			Seq: uint64(i + 1),
+			Entry: record.Entry{
+				Value: []byte(key),
+			},
+		})
+	}
+
+	tests := []struct {
+		name string
+		opts IteratorOptions
+		want []string
+	}{
+		{
+			name: "start only",
+			opts: IteratorOptions{Start: "carrot"},
+			want: []string{"carrot=carrot", "date=date"},
+		},
+		{
+			name: "end only",
+			opts: IteratorOptions{End: "carrot"},
+			want: []string{"apple=apple", "banana=banana"},
+		},
+		{
+			name: "empty bounds",
+			opts: IteratorOptions{},
+			want: []string{
+				"apple=apple",
+				"banana=banana",
+				"carrot=carrot",
+				"date=date",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			it, err := database.NewIterator(tt.opts)
+			if err != nil {
+				t.Fatalf("NewIterator: %v", err)
+			}
+			defer it.Close()
+
+			got := collectIteratorKeyValues(t, it)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("records = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIteratorRangeSupportsPrefixScanBounds(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	for i, key := range []string{
+		"user",
+		"users\x00alice",
+		"users\x00bob",
+		"users\x01",
+		"users\x01carol",
+	} {
+		database.memtable.Put(record.Record{
+			Key: key,
+			Seq: uint64(i + 1),
+			Entry: record.Entry{
+				Value: []byte(key),
+			},
+		})
+	}
+
+	it, err := database.NewIterator(IteratorOptions{
+		Start: "users\x00",
+		End:   "users\x01",
+	})
+	if err != nil {
+		t.Fatalf("NewIterator: %v", err)
+	}
+	defer it.Close()
+
+	got := collectIteratorKeyValues(t, it)
+	want := []string{
+		"users\x00alice=users\x00alice",
+		"users\x00bob=users\x00bob",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("records = %v, want %v", got, want)
+	}
+}
+
 func TestIteratorSuppressesHighestSequenceTombstone(t *testing.T) {
 	useTempWorkingDirectory(t)
 

@@ -7,6 +7,8 @@ import (
 )
 
 type IteratorOptions struct {
+	// Start and End define a half-open key range: Start <= key < End.
+	// An empty boundary is unbounded.
 	Start string
 	End   string
 }
@@ -190,12 +192,12 @@ func (it *Iterator) advanceSource(sourceIndex int) error {
 	for source.Next() {
 		rec := source.Record()
 
-		if it.opts.Start != "" && rec.Key < it.opts.Start {
+		if it.beforeStart(rec.Key) {
 			continue
 		}
 
 		// Source iterators are sorted, so reaching End means this source is done.
-		if it.opts.End != "" && rec.Key >= it.opts.End {
+		if it.atOrPastEnd(rec.Key) {
 			return nil
 		}
 
@@ -207,6 +209,14 @@ func (it *Iterator) advanceSource(sourceIndex int) error {
 	}
 
 	return source.Err()
+}
+
+func (it *Iterator) beforeStart(key string) bool {
+	return it.opts.Start != "" && key < it.opts.Start
+}
+
+func (it *Iterator) atOrPastEnd(key string) bool {
+	return it.opts.End != "" && key >= it.opts.End
 }
 
 func (it *Iterator) closeSources() error {
