@@ -333,6 +333,50 @@ func TestIteratorSuppressesHighestSequenceTombstone(t *testing.T) {
 	}
 }
 
+func TestIteratorSuppressesMemtableTombstoneOverSSTableValue(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	tablePath := "data-0.sst"
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+	}, tablePath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords: %v", err)
+	}
+
+	database.sstables = append(
+		database.sstables,
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: tablePath,
+		}),
+	)
+	database.memtable.Put(record.Record{
+		Key: "apple",
+		Seq: 10,
+		Entry: record.Entry{
+			Deleted: true,
+		},
+	})
+
+	it, err := database.NewIterator(IteratorOptions{})
+	if err != nil {
+		t.Fatalf("NewIterator: %v", err)
+	}
+	defer it.Close()
+
+	got := collectIteratorKeyValues(t, it)
+	if len(got) != 0 {
+		t.Fatalf("records = %v, want empty", got)
+	}
+}
+
 func TestIteratorCollapsesDuplicateKeysToHighestSequence(t *testing.T) {
 	useTempWorkingDirectory(t)
 
@@ -394,6 +438,64 @@ func TestIteratorCollapsesDuplicateKeysToHighestSequence(t *testing.T) {
 	}
 }
 
+func TestIteratorMergesMultipleSSTablesGlobally(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	firstPath := "data-0.sst"
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+		{Key: "carrot", Seq: 3, Entry: record.Entry{Value: []byte("orange")}},
+	}, firstPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords first: %v", err)
+	}
+
+	secondPath := "data-1.sst"
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "banana", Seq: 2, Entry: record.Entry{Value: []byte("yellow")}},
+		{Key: "date", Seq: 4, Entry: record.Entry{Value: []byte("brown")}},
+	}, secondPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords second: %v", err)
+	}
+
+	database.sstables = append(
+		database.sstables,
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   0,
+			Path: firstPath,
+		}),
+		database.newSSTable(manifest.SSTableMetadata{
+			ID:   1,
+			Path: secondPath,
+		}),
+	)
+
+	it, err := database.NewIterator(IteratorOptions{})
+	if err != nil {
+		t.Fatalf("NewIterator: %v", err)
+	}
+	defer it.Close()
+
+	got := collectIteratorKeyValues(t, it)
+	want := []string{
+		"apple=red",
+		"banana=yellow",
+		"carrot=orange",
+		"date=brown",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("records = %v, want %v", got, want)
+	}
+}
+
 func TestIteratorUsesSequenceOverSourceRecency(t *testing.T) {
 	useTempWorkingDirectory(t)
 
@@ -440,6 +542,34 @@ func TestIteratorUsesSequenceOverSourceRecency(t *testing.T) {
 	}
 }
 
+func TestIteratorPropagatesSourceErrors(t *testing.T) {
+	wantErr := errors.New("source failed")
+	source := &failingIterator{err: wantErr}
+	it := &Iterator{
+		sources: []record.Iterator{source},
+		heap: mergeHeap{
+			&mergeItem{
+				record: record.Record{
+					Key: "apple",
+					Seq: 1,
+					Entry: record.Entry{
+						Value: []byte("red"),
+					},
+				},
+				sourceIndex: 0,
+			},
+		},
+	}
+
+	if it.Next() {
+		t.Fatalf("Next returned record %+v, want false", it.Record())
+	}
+
+	if !errors.Is(it.Err(), wantErr) {
+		t.Fatalf("Err = %v, want %v", it.Err(), wantErr)
+	}
+}
+
 func TestIteratorReturnsErrClosed(t *testing.T) {
 	useTempWorkingDirectory(t)
 
@@ -478,4 +608,24 @@ func collectIteratorKeyValues(t *testing.T, it *Iterator) []string {
 	}
 
 	return got
+}
+
+type failingIterator struct {
+	err error
+}
+
+func (it *failingIterator) Next() bool {
+	return false
+}
+
+func (it *failingIterator) Record() record.Record {
+	return record.Record{}
+}
+
+func (it *failingIterator) Err() error {
+	return it.err
+}
+
+func (it *failingIterator) Close() error {
+	return nil
 }
