@@ -120,25 +120,10 @@ func (it *Iterator) Next() bool {
 	}
 
 	for it.heap.Len() > 0 {
-		item := heap.Pop(&it.heap).(*mergeItem)
-		key := item.record.Key
-		best := item.record
-
-		if err := it.advanceSource(item.sourceIndex); err != nil {
+		best, err := it.resolveNextKey()
+		if err != nil {
 			it.err = err
 			return false
-		}
-
-		for it.heap.Len() > 0 && it.heap[0].record.Key == key {
-			item = heap.Pop(&it.heap).(*mergeItem)
-			if item.record.Seq > best.Seq {
-				best = item.record
-			}
-
-			if err := it.advanceSource(item.sourceIndex); err != nil {
-				it.err = err
-				return false
-			}
 		}
 
 		if best.Deleted {
@@ -150,6 +135,31 @@ func (it *Iterator) Next() bool {
 	}
 
 	return false
+}
+
+// consume every heap item for the smallest key, advance each
+// contributing source, and return the highest-sequence record for that key.
+func (it *Iterator) resolveNextKey() (record.Record, error) {
+	item := heap.Pop(&it.heap).(*mergeItem)
+	key := item.record.Key
+	best := item.record
+
+	if err := it.advanceSource(item.sourceIndex); err != nil {
+		return record.Record{}, err
+	}
+
+	for it.heap.Len() > 0 && it.heap[0].record.Key == key {
+		item = heap.Pop(&it.heap).(*mergeItem)
+		if item.record.Seq > best.Seq {
+			best = item.record
+		}
+
+		if err := it.advanceSource(item.sourceIndex); err != nil {
+			return record.Record{}, err
+		}
+	}
+
+	return best, nil
 }
 
 func (it *Iterator) Record() record.Record {
