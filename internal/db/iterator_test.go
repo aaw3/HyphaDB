@@ -210,6 +210,85 @@ func TestIteratorRangeSupportsPrefixScanBounds(t *testing.T) {
 	}
 }
 
+func TestScanPrefixUsesRangeBounds(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	for i, key := range []string{
+		"user",
+		"users\x00alice",
+		"users\x00bob",
+		"users\x01",
+		"users\x01carol",
+	} {
+		database.memtable.Put(record.Record{
+			Key: key,
+			Seq: uint64(i + 1),
+			Entry: record.Entry{
+				Value: []byte(key),
+			},
+		})
+	}
+
+	it, err := database.ScanPrefix("users\x00")
+	if err != nil {
+		t.Fatalf("ScanPrefix: %v", err)
+	}
+	defer it.Close()
+
+	got := collectIteratorKeyValues(t, it)
+	want := []string{
+		"users\x00alice=users\x00alice",
+		"users\x00bob=users\x00bob",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("records = %v, want %v", got, want)
+	}
+}
+
+func TestPrefixEnd(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "empty",
+			prefix: "",
+			want:   "",
+		},
+		{
+			name:   "ascii",
+			prefix: "users\x00",
+			want:   "users\x01",
+		},
+		{
+			name:   "carry trailing max byte",
+			prefix: "users\x00\xff",
+			want:   "users\x01",
+		},
+		{
+			name:   "no finite end",
+			prefix: "\xff",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PrefixEnd(tt.prefix); got != tt.want {
+				t.Fatalf("PrefixEnd(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIteratorSuppressesHighestSequenceTombstone(t *testing.T) {
 	useTempWorkingDirectory(t)
 

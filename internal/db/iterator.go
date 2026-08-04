@@ -116,6 +116,29 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 	return it, nil
 }
 
+func (db *DB) ScanPrefix(prefix string) (*Iterator, error) {
+	return db.NewIterator(IteratorOptions{
+		Start: prefix,
+		End:   PrefixEnd(prefix),
+	})
+}
+
+func PrefixEnd(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+
+	end := []byte(prefix)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] != 0xff {
+			end[i]++
+			return string(end[:i+1])
+		}
+	}
+
+	return ""
+}
+
 func (it *Iterator) Next() bool {
 	if it.closed || it.err != nil {
 		return false
