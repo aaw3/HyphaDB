@@ -12,8 +12,9 @@ type Manifest struct {
 }
 
 type SSTableMetadata struct {
-	ID   uint64
-	Path string
+	ID    uint64
+	Path  string
+	Level uint32
 }
 
 func Read(path string) (*Manifest, error) {

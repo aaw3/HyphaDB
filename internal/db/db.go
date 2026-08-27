@@ -110,6 +110,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
 	return sstable.New(meta.Path, sstable.OpenOptions{
 		ID:         meta.ID,
+		Level:      meta.Level,
 		BlockCache: db.blockCache,
 	})
 }
@@ -143,8 +144,9 @@ func (db *DB) compactLocked() error {
 	oldTables := db.manifest.SSTables
 	db.manifest.NextSSTableID++
 	compactedMeta := manifest.SSTableMetadata{
-		ID:   id,
-		Path: compactedSSTablePath,
+		ID:    id,
+		Path:  compactedSSTablePath,
+		Level: 0,
 	}
 	db.manifest.SSTables = []manifest.SSTableMetadata{
 		compactedMeta,
@@ -430,8 +432,9 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	}
 
 	meta := manifest.SSTableMetadata{
-		ID:   id,
-		Path: sstablePath,
+		ID:    id,
+		Path:  sstablePath,
+		Level: 0,
 	}
 	sst := db.newSSTable(meta)
 
