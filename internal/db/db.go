@@ -123,7 +123,16 @@ func (db *DB) Compact() error {
 func (db *DB) compactLocked() error {
 	id := db.manifest.NextSSTableID
 	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
-	_, err := compaction.MergeSSTables(db.sstables, compactedSSTablePath)
+	oldestReader, hasReader := db.oldestReaderLocked()
+	var retention *uint64
+	if hasReader {
+		retention = &oldestReader
+	}
+	_, err := compaction.MergeSSTablesWithRetention(
+		db.sstables,
+		compactedSSTablePath,
+		retention,
+	)
 	if err != nil {
 		return err
 	}
@@ -227,6 +236,20 @@ func (db *DB) unregisterReaderLocked(sequence uint64) {
 		return
 	}
 	db.activeReaders[sequence] = count - 1
+}
+
+func (db *DB) oldestReaderLocked() (uint64, bool) {
+	var oldest uint64
+	found := false
+
+	for sequence := range db.activeReaders {
+		if !found || sequence < oldest {
+			oldest = sequence
+			found = true
+		}
+	}
+
+	return oldest, found
 }
 
 // currentSequenceLocked returns the highest sequence currently represented by

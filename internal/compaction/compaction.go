@@ -8,6 +8,17 @@ import (
 )
 
 func MergeSSTables(sstables []*sstable.SSTable, newPath string) (*sstable.SSTable, error) {
+	return MergeSSTablesWithRetention(sstables, newPath, nil)
+}
+
+// MergeSSTablesWithRetention merges tables while preserving the versions
+// visible to the oldest active reader. A nil oldestReader keeps only the
+// newest non-tombstone version.
+func MergeSSTablesWithRetention(
+	sstables []*sstable.SSTable,
+	newPath string,
+	oldestReader *uint64,
+) (*sstable.SSTable, error) {
 	iters := make([]*sstable.Iterator, len(sstables))
 
 	h := &MinHeap{}
@@ -39,19 +50,40 @@ func MergeSSTables(sstables []*sstable.SSTable, newPath string) (*sstable.SSTabl
 	var output []record.Record
 	var lastKey string
 	firstKey := true
+	retainedVisible := false
 
 	for h.Len() > 0 {
-		// pop min pair from heap, write it to new SSTable
 		item := heap.Pop(h).(*HeapItem)
 
-		// If duplicate, skip
 		if firstKey || item.Record.Key != lastKey {
-			if !item.Record.Deleted {
-				output = append(output, item.Record)
-			}
-
 			lastKey = item.Record.Key
 			firstKey = false
+			retainedVisible = false
+		}
+
+		keep := false
+		if oldestReader == nil {
+			// Without active readers, only the newest version is needed.
+			keep = !retainedVisible && !item.Record.Deleted
+			retainedVisible = true
+		} else if item.Record.Seq > *oldestReader {
+			// Newer versions may be visible to newer readers or future reads.
+			keep = true
+		} else if !retainedVisible {
+			// Keep the newest version visible to the oldest reader, including
+			// a tombstone.
+			keep = true
+			retainedVisible = true
+		}
+
+		if keep {
+			output = append(output, item.Record)
+		}
+
+		// Once a version at or below the retention boundary has been kept,
+		// all remaining versions for this key are older and can be skipped.
+		if oldestReader != nil && item.Record.Seq <= *oldestReader {
+			retainedVisible = true
 		}
 
 		it := iters[item.SSTableIndex]

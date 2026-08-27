@@ -116,6 +116,101 @@ func TestMergeSSTablesUsesHighestSequence(t *testing.T) {
 	}
 }
 
+func TestMergeSSTablesPreservesVersionsForReader(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.sst")
+	newPath := filepath.Join(dir, "new.sst")
+	mergedPath := filepath.Join(dir, "merged.sst")
+
+	old, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("old")}},
+	}, oldPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create old SSTable failed: %v", err)
+	}
+	newer, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}},
+	}, newPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create new SSTable failed: %v", err)
+	}
+
+	merged, err := MergeSSTablesWithRetention(
+		[]*sstable.SSTable{old, newer},
+		mergedPath,
+		uint64Ptr(7),
+	)
+	if err != nil {
+		t.Fatalf("MergeSSTablesWithRetention failed: %v", err)
+	}
+
+	got, ok, err := merged.GetRecordAt("apple", 7)
+	if err != nil {
+		t.Fatalf("GetRecordAt snapshot: %v", err)
+	}
+	if !ok || got.Seq != 5 || string(got.Value) != "red" {
+		t.Fatalf("snapshot record = %+v, %v; want seq=5 value=red", got, ok)
+	}
+
+	got, ok, err = merged.GetRecordAt("apple", 10)
+	if err != nil {
+		t.Fatalf("GetRecordAt latest: %v", err)
+	}
+	if !ok || got.Seq != 10 || string(got.Value) != "green" {
+		t.Fatalf("latest record = %+v, %v; want seq=10 value=green", got, ok)
+	}
+}
+
+func TestMergeSSTablesPreservesTombstoneForReader(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.sst")
+	newPath := filepath.Join(dir, "new.sst")
+	mergedPath := filepath.Join(dir, "merged.sst")
+
+	old, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+	}, oldPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create old SSTable failed: %v", err)
+	}
+	newer, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 10, Entry: record.Entry{Deleted: true}},
+	}, newPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create new SSTable failed: %v", err)
+	}
+
+	merged, err := MergeSSTablesWithRetention(
+		[]*sstable.SSTable{old, newer},
+		mergedPath,
+		uint64Ptr(7),
+	)
+	if err != nil {
+		t.Fatalf("MergeSSTablesWithRetention failed: %v", err)
+	}
+
+	got, ok, err := merged.GetRecordAt("apple", 7)
+	if err != nil {
+		t.Fatalf("GetRecordAt snapshot: %v", err)
+	}
+	if !ok || got.Seq != 5 || string(got.Value) != "red" {
+		t.Fatalf("snapshot record = %+v, %v; want seq=5 value=red", got, ok)
+	}
+
+	got, ok, err = merged.GetRecordAt("apple", 10)
+	if err != nil {
+		t.Fatalf("GetRecordAt latest: %v", err)
+	}
+	if !ok || got.Seq != 10 || !got.Deleted {
+		t.Fatalf("latest record = %+v, %v; want seq=10 tombstone", got, ok)
+	}
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
 func TestMergeSSTablesDropsDeletedKey(t *testing.T) {
 	dir := t.TempDir()
 
