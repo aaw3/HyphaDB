@@ -29,10 +29,11 @@ type DB struct {
 	compactionThreshold int
 	nextSeq             uint64
 
-	mu          sync.RWMutex
-	flushSignal chan struct{}
-	closed      bool
-	flushWG     sync.WaitGroup
+	mu            sync.RWMutex
+	flushSignal   chan struct{}
+	activeReaders map[uint64]int
+	closed        bool
+	flushWG       sync.WaitGroup
 }
 
 var ErrClosed = errors.New("database is closed")
@@ -81,6 +82,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		manifestPath:        manifestPath,
 		compactionThreshold: compactionThreshold,
 		flushSignal:         make(chan struct{}, 1),
+		activeReaders:       make(map[uint64]int),
 	}
 
 	for _, table := range mf.SSTables {
@@ -212,6 +214,38 @@ func (db *DB) getAt(key string, maxSeq uint64) ([]byte, error) {
 		return nil, sstable.ErrNotFound
 	}
 	return best.Value, nil
+}
+
+func (db *DB) registerReaderLocked(sequence uint64) {
+	db.activeReaders[sequence]++
+}
+
+func (db *DB) unregisterReaderLocked(sequence uint64) {
+	count := db.activeReaders[sequence]
+	if count <= 1 {
+		delete(db.activeReaders, sequence)
+		return
+	}
+	db.activeReaders[sequence] = count - 1
+}
+
+// currentSequenceLocked returns the highest sequence currently represented by
+// the database. The caller must hold db.mu.
+func (db *DB) currentSequenceLocked() (uint64, error) {
+	maxSeq := db.nextSeq - 1
+
+	if seq := maxSeqFromMemTable(db.memtable); seq > maxSeq {
+		maxSeq = seq
+	}
+	seq, err := maxSeqFromSSTables(db.sstables)
+	if err != nil {
+		return 0, err
+	}
+	if seq > maxSeq {
+		maxSeq = seq
+	}
+
+	return maxSeq, nil
 }
 
 func (db *DB) Put(key string, value []byte) error {

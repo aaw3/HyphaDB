@@ -14,13 +14,15 @@ type IteratorOptions struct {
 }
 
 type Iterator struct {
-	db      *DB
-	opts    IteratorOptions
-	sources []record.Iterator
-	heap    mergeHeap
-	current record.Record
-	err     error
-	closed  bool
+	db         *DB
+	opts       IteratorOptions
+	maxSeq     uint64
+	sources    []record.Iterator
+	heap       mergeHeap
+	current    record.Record
+	err        error
+	closed     bool
+	registered bool
 }
 
 // Compile-time check that *Iterator satisfies the shared record iterator API.
@@ -63,16 +65,25 @@ func (h *mergeHeap) Pop() any {
 }
 
 func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
-	db.mu.RLock()
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
 	if db.closed {
-		db.mu.RUnlock()
 		return nil, ErrClosed
 	}
 
+	maxSeq, err := db.currentSequenceLocked()
+	if err != nil {
+		return nil, err
+	}
+	return db.newIteratorLocked(opts, maxSeq)
+}
+
+func (db *DB) newIteratorLocked(opts IteratorOptions, maxSeq uint64) (*Iterator, error) {
 	it := &Iterator{
-		db:   db,
-		opts: opts,
+		db:     db,
+		opts:   opts,
+		maxSeq: maxSeq,
 	}
 
 	it.sources = append(it.sources, db.memtable.Iterator())
@@ -85,7 +96,6 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 		sstIt, err := db.sstables[i].Iterator()
 		if err != nil {
 			it.closeSources()
-			db.mu.RUnlock()
 			return nil, err
 		}
 
@@ -99,7 +109,6 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 			if seeker, ok := it.sources[i].(record.SeekableIterator); ok {
 				if err := seeker.Seek(opts.Start); err != nil {
 					it.closeSources()
-					db.mu.RUnlock()
 					return nil, err
 				}
 			}
@@ -108,11 +117,12 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 		// Prime the merge heap with the first in-range record from each source.
 		if err := it.advanceSource(i); err != nil {
 			it.closeSources()
-			db.mu.RUnlock()
 			return nil, err
 		}
 	}
 
+	db.registerReaderLocked(maxSeq)
+	it.registered = true
 	return it, nil
 }
 
@@ -202,7 +212,12 @@ func (it *Iterator) Close() error {
 
 	it.closed = true
 	err := it.closeSources()
-	it.db.mu.RUnlock()
+	if it.registered && it.db != nil {
+		it.db.mu.Lock()
+		it.db.unregisterReaderLocked(it.maxSeq)
+		it.db.mu.Unlock()
+		it.registered = false
+	}
 	return err
 }
 
@@ -214,6 +229,10 @@ func (it *Iterator) advanceSource(sourceIndex int) error {
 
 	for source.Next() {
 		rec := source.Record()
+
+		if rec.Seq > it.maxSeq {
+			continue
+		}
 
 		if it.beforeStart(rec.Key) {
 			continue
