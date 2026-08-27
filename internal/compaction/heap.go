@@ -22,7 +22,11 @@ func (h MinHeap) Less(i, j int) bool {
 		return keyI < keyJ
 	}
 
-	// if keys are equal, use newer SSTable to break the tie
+	if h[i].Record.Seq != h[j].Record.Seq {
+		return h[i].Record.Seq > h[j].Record.Seq
+	}
+
+	// Equal sequence numbers are resolved in favor of the newer SSTable.
 	return h[i].SSTableIndex > h[j].SSTableIndex
 
 }

@@ -30,7 +30,7 @@ func TestMemTablePutAndGet(t *testing.T) {
 	}
 }
 
-func TestMemTableOverwriteReplacesRecord(t *testing.T) {
+func TestMemTableRetainsMultipleVersions(t *testing.T) {
 	mt := New()
 
 	mt.Put(record.Record{
@@ -62,9 +62,9 @@ func TestMemTableOverwriteReplacesRecord(t *testing.T) {
 		t.Fatalf("value = %q, want new", got.Value)
 	}
 
-	if len(mt.Records()) != 1 {
+	if len(mt.Records()) != 2 {
 		t.Fatalf(
-			"record count = %d, want 1",
+			"record count = %d, want 2",
 			len(mt.Records()),
 		)
 	}
@@ -92,6 +92,17 @@ func TestMemTablePreservesTombstone(t *testing.T) {
 
 	if got.Seq != 3 {
 		t.Fatalf("sequence = %d, want 3", got.Seq)
+	}
+}
+
+func TestMemTableGetAtReturnsVisibleVersion(t *testing.T) {
+	mt := New()
+	mt.Put(record.Record{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}})
+	mt.Put(record.Record{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}})
+
+	got, ok := mt.GetAt("apple", 7)
+	if !ok || got.Seq != 5 || string(got.Value) != "red" {
+		t.Fatalf("GetAt(apple, 7) = %+v, %v; want seq=5 value=red", got, ok)
 	}
 }
 

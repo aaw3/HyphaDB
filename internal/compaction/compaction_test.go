@@ -82,6 +82,40 @@ func TestMergeSSTablesKeepsNewestValue(t *testing.T) {
 	}
 }
 
+func TestMergeSSTablesUsesHighestSequence(t *testing.T) {
+	dir := t.TempDir()
+
+	olderPath := filepath.Join(dir, "older.sst")
+	newerPath := filepath.Join(dir, "newer.sst")
+	mergedPath := filepath.Join(dir, "merged.sst")
+
+	older, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}},
+	}, olderPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create older SSTable failed: %v", err)
+	}
+	newer, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+	}, newerPath, sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create newer SSTable failed: %v", err)
+	}
+
+	merged, err := MergeSSTables([]*sstable.SSTable{older, newer}, mergedPath)
+	if err != nil {
+		t.Fatalf("MergeSSTables failed: %v", err)
+	}
+
+	got, err := merged.Get("apple")
+	if err != nil {
+		t.Fatalf("Get(apple): %v", err)
+	}
+	if string(got) != "green" {
+		t.Fatalf("Get(apple) = %q, want green", got)
+	}
+}
+
 func TestMergeSSTablesDropsDeletedKey(t *testing.T) {
 	dir := t.TempDir()
 

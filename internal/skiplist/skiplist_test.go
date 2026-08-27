@@ -38,7 +38,7 @@ func TestSkipListGetReturnsInsertedRecords(t *testing.T) {
 	}
 }
 
-func TestSkipListOverwriteReplacesExistingRecord(t *testing.T) {
+func TestSkipListRetainsMultipleVersions(t *testing.T) {
 	sl := New()
 
 	sl.Put(record.Record{Key: "a", Seq: 1, Entry: record.Entry{Value: []byte("old")}})
@@ -53,8 +53,8 @@ func TestSkipListOverwriteReplacesExistingRecord(t *testing.T) {
 	}
 
 	records := sl.Records()
-	if len(records) != 1 {
-		t.Fatalf("got %d records, want 1", len(records))
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
 	}
 }
 
@@ -70,6 +70,31 @@ func TestSkipListStoresTombstoneRecord(t *testing.T) {
 	}
 	if !got.Deleted || got.Seq != 2 {
 		t.Fatalf("got %+v, want deleted record with seq=2", got)
+	}
+}
+
+func TestSkipListVersionsAreOrderedAndVisibleBySequence(t *testing.T) {
+	sl := New()
+
+	sl.Put(record.Record{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}})
+	sl.Put(record.Record{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}})
+	sl.Put(record.Record{Key: "banana", Seq: 1})
+
+	records := sl.Records()
+	if got, want := records[0].Seq, uint64(10); got != want {
+		t.Fatalf("first apple sequence = %d, want %d", got, want)
+	}
+	if got, want := records[1].Seq, uint64(5); got != want {
+		t.Fatalf("second apple sequence = %d, want %d", got, want)
+	}
+
+	got, ok := sl.GetAt("apple", 7)
+	if !ok || got.Seq != 5 || string(got.Value) != "red" {
+		t.Fatalf("GetAt(apple, 7) = %+v, %v; want seq=5 value=red", got, ok)
+	}
+	got, ok = sl.GetAt("apple", 10)
+	if !ok || got.Seq != 10 || string(got.Value) != "green" {
+		t.Fatalf("GetAt(apple, 10) = %+v, %v; want seq=10 value=green", got, ok)
 	}
 }
 

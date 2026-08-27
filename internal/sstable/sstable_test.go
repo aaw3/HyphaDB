@@ -71,6 +71,27 @@ func TestGetDeleteKeyReturnsErrDeleted(t *testing.T) {
 	}
 }
 
+func TestGetRecordAtReturnsVisibleVersion(t *testing.T) {
+	path := t.TempDir() + "/versions.sst"
+	records := []record.Record{
+		{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}},
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+	}
+
+	sst, err := CreateFromRecords(records, path, DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+
+	got, ok, err := sst.GetRecordAt("apple", 7)
+	if err != nil {
+		t.Fatalf("GetRecordAt failed: %v", err)
+	}
+	if !ok || got.Seq != 5 || string(got.Value) != "red" {
+		t.Fatalf("GetRecordAt(apple, 7) = %+v, %v; want seq=5 value=red", got, ok)
+	}
+}
+
 func TestCreateFromRecordsWithTinyBlockSize(t *testing.T) {
 	path := t.TempDir() + "/test_sstable_tiny_block.sst"
 	records := []record.Record{

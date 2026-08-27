@@ -30,6 +30,11 @@ func (m *MemTable) Get(key string) (record.Record, bool) {
 	return rec, true
 }
 
+// GetAt returns the newest version of key visible at maxSeq.
+func (m *MemTable) GetAt(key string, maxSeq uint64) (record.Record, bool) {
+	return m.data.GetAt(key, maxSeq)
+}
+
 func (m *MemTable) Put(rec record.Record) {
 	m.data.Put(rec)
 }

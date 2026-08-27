@@ -13,6 +13,7 @@ type SkipList struct {
 	maxLevel int
 	rng      *rand.Rand // use a per-instance rng for better randomness
 	count    int
+	keyCount int
 }
 
 const defaultMaxLevel = 16
@@ -69,20 +70,25 @@ func (s *SkipList) Put(rec record.Record) {
 
 	// find the position to insert the new node
 	for i := s.level - 1; i >= 0; i-- {
-		// iterate until we find a node with a greater key or reach the end of the list
-		for x.next[i] != nil && x.next[i].key < rec.Key {
+		// Records are ordered by key ascending and sequence descending.
+		for x.next[i] != nil && less(x.next[i].record, rec) {
 			x = x.next[i]
 		}
 		update[i] = x
 	}
+	keyExists := (x != s.head && x.key == rec.Key) ||
+		(x.next[0] != nil && x.next[0].key == rec.Key)
 
 	// move to bottom level to check if the key already exists
 	x = x.next[0]
 
-	// if key exists, update the record
-	if x != nil && x.key == rec.Key {
+	// An identical key and sequence is a replacement, not a new version.
+	if x != nil && x.key == rec.Key && x.record.Seq == rec.Seq {
 		x.record = rec
 		return
+	}
+	if !keyExists {
+		s.keyCount++
 	}
 
 	newLevel := s.randomLevel()
@@ -120,8 +126,19 @@ func (s *SkipList) Get(key string) (record.Record, bool) {
 	return record.Record{}, false
 }
 
+// GetAt returns the newest version of key visible at maxSeq.
+func (s *SkipList) GetAt(key string, maxSeq uint64) (record.Record, bool) {
+	for x := s.lowerBound(key); x != nil && x.key == key; x = x.next[0] {
+		if x.record.Seq <= maxSeq {
+			return x.record, true
+		}
+	}
+
+	return record.Record{}, false
+}
+
 func (s *SkipList) Len() int {
-	return s.count
+	return s.keyCount
 }
 
 func (s *SkipList) lowerBound(key string) *node {
@@ -134,4 +151,12 @@ func (s *SkipList) lowerBound(key string) *node {
 	}
 
 	return x.next[0]
+}
+
+func less(a, b record.Record) bool {
+	if a.Key != b.Key {
+		return a.Key < b.Key
+	}
+
+	return a.Seq > b.Seq
 }

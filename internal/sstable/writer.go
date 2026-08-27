@@ -76,6 +76,7 @@ func CreateFromIteratorWithOptions(
 	var recordCount int
 	var blockFirstKey string
 	var previousKey string
+	var previousSeq uint64
 	firstRecord := true
 
 	// closure to start a new block
@@ -139,7 +140,17 @@ func CreateFromIteratorWithOptions(
 				rec.Key,
 			)
 		}
+		if !firstRecord && previousKey == rec.Key && previousSeq < rec.Seq {
+			return nil, fmt.Errorf(
+				"%w: sequence %d for key %q appears after %d",
+				ErrUnsortedRecords,
+				rec.Seq,
+				rec.Key,
+				previousSeq,
+			)
+		}
 		previousKey = rec.Key
+		previousSeq = rec.Seq
 		firstRecord = false
 
 		if bloomFilterEnabled {

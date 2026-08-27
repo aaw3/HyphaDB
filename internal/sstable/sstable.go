@@ -9,6 +9,7 @@ import (
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/bloom"
+	"github.com/aaw3/hyphadb/internal/record"
 )
 
 var ErrNotFound = errors.New("key not found")
@@ -41,62 +42,67 @@ func New(path string, opts OpenOptions) *SSTable {
 }
 
 func (s *SSTable) Get(key string) ([]byte, error) {
-	if err := s.loadMetadata(); err != nil {
+	rec, ok, err := s.GetRecordAt(key, ^uint64(0))
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if rec.Deleted {
+		return nil, ErrDeleted
+	}
+	return rec.Value, nil
+}
+
+// GetRecordAt returns the newest version of key with sequence <= maxSeq.
+func (s *SSTable) GetRecordAt(key string, maxSeq uint64) (record.Record, bool, error) {
+	if err := s.loadMetadata(); err != nil {
+		return record.Record{}, false, err
 	}
 
 	s.metaMu.RLock()
 
 	if s.filter != nil && !s.filter.MayContain([]byte(key)) {
 		s.metaMu.RUnlock()
-		return nil, ErrNotFound
+		return record.Record{}, false, nil
 	}
 
 	if len(s.index) == 0 {
 		s.metaMu.RUnlock()
-		return nil, ErrNotFound
+		return record.Record{}, false, nil
 	}
+	s.metaMu.RUnlock()
 
-	// find the block that contains the key using binary search
+	// Find the first block that may contain key. Continue through subsequent
+	// blocks because multiple versions of one key may cross a block boundary.
 	i := sort.Search(len(s.index), func(i int) bool {
 		return s.index[i].FirstKey > key
 	}) - 1
-
 	if i < 0 {
-		s.metaMu.RUnlock()
-		return nil, ErrNotFound
+		return record.Record{}, false, nil
 	}
 
-	entry := s.index[i]
-	s.metaMu.RUnlock()
+	for ; i < len(s.index); i++ {
+		logical, err := s.readLogicalBlock(s.index[i])
+		if err != nil {
+			return record.Record{}, false, err
+		}
+		records, err := decodeLogicalBlock(logical)
+		if err != nil {
+			return record.Record{}, false, err
+		}
 
-	// read the physical block from the file
-	logical, err := s.readLogicalBlock(entry)
-	if err != nil {
-		return nil, err
-	}
-
-	// decode the block into records
-	records, err := decodeLogicalBlock(logical)
-	if err != nil {
-		return nil, err
-	}
-
-	// search for the key in the records
-	for _, rec := range records {
-		if rec.Key == key {
-			if rec.Deleted {
-				return nil, ErrDeleted
+		for _, rec := range records {
+			if rec.Key == key && rec.Seq <= maxSeq {
+				return rec, true, nil
 			}
-			return rec.Value, nil
-		}
-
-		if rec.Key > key {
-			return nil, ErrNotFound
+			if rec.Key > key {
+				return record.Record{}, false, nil
+			}
 		}
 	}
-
-	return nil, ErrNotFound
+	return record.Record{}, false, nil
 }
 
 func (s *SSTable) MaxSeq() (uint64, error) {

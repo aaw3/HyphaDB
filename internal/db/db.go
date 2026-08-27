@@ -182,42 +182,36 @@ func (db *DB) Get(key string) ([]byte, error) {
 		return nil, ErrClosed
 	}
 
-	if rec, exists := db.memtable.Get(key); exists {
-		if rec.Deleted {
-			return nil, sstable.ErrNotFound
-		}
+	return db.getAt(key, ^uint64(0))
+}
 
-		return rec.Value, nil
+func (db *DB) getAt(key string, maxSeq uint64) ([]byte, error) {
+	var best record.Record
+	var found bool
+
+	consider := func(rec record.Record, exists bool) {
+		if exists && (!found || rec.Seq > best.Seq) {
+			best = rec
+			found = true
+		}
 	}
 
+	consider(db.memtable.GetAt(key, maxSeq))
 	for i := len(db.immutableMemtables) - 1; i >= 0; i-- {
-		if rec, exists := db.immutableMemtables[i].MemTable.Get(key); exists {
-			if rec.Deleted {
-				return nil, sstable.ErrNotFound
-			}
-
-			return rec.Value, nil
-		}
+		consider(db.immutableMemtables[i].MemTable.GetAt(key, maxSeq))
 	}
-
-	// Check SSTables in reverse order (newest to oldest)
 	for i := len(db.sstables) - 1; i >= 0; i-- {
-		val, err := db.sstables[i].Get(key)
-		switch {
-		case err == nil:
-			return val, nil
-
-		case errors.Is(err, sstable.ErrDeleted):
-			return nil, sstable.ErrNotFound
-
-		case errors.Is(err, sstable.ErrNotFound):
-			continue
-
-		default:
+		rec, exists, err := db.sstables[i].GetRecordAt(key, maxSeq)
+		if err != nil {
 			return nil, err
 		}
+		consider(rec, exists)
 	}
-	return nil, sstable.ErrNotFound
+
+	if !found || best.Deleted {
+		return nil, sstable.ErrNotFound
+	}
+	return best.Value, nil
 }
 
 func (db *DB) Put(key string, value []byte) error {
