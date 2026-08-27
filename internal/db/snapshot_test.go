@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -50,6 +51,53 @@ func TestSnapshotReadsPointInTime(t *testing.T) {
 	}
 	if string(got) != "green" {
 		t.Fatalf("latest Get = %q, want green", got)
+	}
+}
+
+func TestMultipleSnapshotsUseIndependentSequences(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put red: %v", err)
+	}
+	oldSnapshot, err := database.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot old: %v", err)
+	}
+	defer oldSnapshot.Close()
+
+	if err := database.Put("apple", []byte("green")); err != nil {
+		t.Fatalf("Put green: %v", err)
+	}
+	newSnapshot, err := database.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot new: %v", err)
+	}
+	defer newSnapshot.Close()
+
+	if err := database.Put("apple", []byte("blue")); err != nil {
+		t.Fatalf("Put blue: %v", err)
+	}
+
+	got, err := oldSnapshot.Get("apple")
+	if err != nil {
+		t.Fatalf("old snapshot Get: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("old snapshot Get = %q, want red", got)
+	}
+	got, err = newSnapshot.Get("apple")
+	if err != nil {
+		t.Fatalf("new snapshot Get: %v", err)
+	}
+	if string(got) != "green" {
+		t.Fatalf("new snapshot Get = %q, want green", got)
 	}
 }
 
@@ -268,4 +316,92 @@ func TestCompactionPreservesActiveSnapshotHistory(t *testing.T) {
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("old SSTable still exists, stat error = %v", err)
 	}
+}
+
+func TestCompactionUsesOldestReaderAndReclaimsAfterClose(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 100)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	addTable := func(id uint64, sequence uint64, value string) {
+		t.Helper()
+		path := fmt.Sprintf("data-%d.sst", id)
+		_, err := sstable.CreateFromRecords([]record.Record{{
+			Key: "apple", Seq: sequence,
+			Entry: record.Entry{Value: []byte(value)},
+		}}, path, sstable.DefaultBlockSize)
+		if err != nil {
+			t.Fatalf("create SSTable %d: %v", id, err)
+		}
+		database.sstables = append(database.sstables, database.newSSTable(manifest.SSTableMetadata{
+			ID: id, Path: path,
+		}))
+		database.manifest.SSTables = append(database.manifest.SSTables, manifest.SSTableMetadata{
+			ID: id, Path: path,
+		})
+		database.manifest.NextSSTableID = id + 1
+		database.nextSeq = sequence + 1
+	}
+
+	addTable(0, 1, "red")
+	oldSnapshot, err := database.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot old: %v", err)
+	}
+
+	addTable(1, 2, "green")
+	newSnapshot, err := database.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot new: %v", err)
+	}
+	addTable(2, 3, "blue")
+
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact with two snapshots: %v", err)
+	}
+	if got := sstableSequences(t, database.sstables[0]); !reflect.DeepEqual(got, []uint64{3, 2, 1}) {
+		t.Fatalf("versions with two snapshots = %v, want [3 2 1]", got)
+	}
+
+	if err := oldSnapshot.Close(); err != nil {
+		t.Fatalf("Close old snapshot: %v", err)
+	}
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact with new snapshot: %v", err)
+	}
+	if got := sstableSequences(t, database.sstables[0]); !reflect.DeepEqual(got, []uint64{3, 2}) {
+		t.Fatalf("versions after old snapshot close = %v, want [3 2]", got)
+	}
+
+	if err := newSnapshot.Close(); err != nil {
+		t.Fatalf("Close new snapshot: %v", err)
+	}
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact without snapshots: %v", err)
+	}
+	if got := sstableSequences(t, database.sstables[0]); !reflect.DeepEqual(got, []uint64{3}) {
+		t.Fatalf("versions after all snapshots close = %v, want [3]", got)
+	}
+}
+
+func sstableSequences(t *testing.T, table *sstable.SSTable) []uint64 {
+	t.Helper()
+	it, err := table.Iterator()
+	if err != nil {
+		t.Fatalf("SSTable Iterator: %v", err)
+	}
+	defer it.Close()
+
+	var sequences []uint64
+	for it.Next() {
+		sequences = append(sequences, it.Record().Seq)
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("SSTable iterator error: %v", err)
+	}
+	return sequences
 }
