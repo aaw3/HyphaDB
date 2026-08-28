@@ -578,6 +578,71 @@ func TestCompactionPreservesDisjointL1Table(t *testing.T) {
 	}
 }
 
+func TestCompactionMergesL1IntoL2(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	createTable := func(id uint64, level uint32, path, key, value string) {
+		t.Helper()
+		_, err := sstable.CreateFromRecords([]record.Record{{
+			Key:   key,
+			Seq:   id + 1,
+			Entry: record.Entry{Value: []byte(value)},
+		}}, path, sstable.DefaultBlockSize)
+		if err != nil {
+			t.Fatalf("create SSTable %d: %v", id, err)
+		}
+
+		meta := manifest.SSTableMetadata{
+			ID:          id,
+			Path:        path,
+			Level:       level,
+			SmallestKey: key,
+			LargestKey:  key,
+		}
+		database.sstables = append(database.sstables, database.newSSTable(meta))
+		database.manifest.SSTables = append(database.manifest.SSTables, meta)
+	}
+
+	createTable(0, compaction.L0+1, "data-0.sst", "apple", "red")
+	createTable(1, compaction.L0+2, "data-1.sst", "apple", "green")
+	createTable(2, compaction.L0+2, "zebra", "zebra", "black-white")
+	database.manifest.NextSSTableID = 3
+
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if len(database.sstables) != 2 {
+		t.Fatalf("SSTables after compaction = %d, want 2", len(database.sstables))
+	}
+	if database.sstables[0].ID != 3 || database.sstables[0].Level != compaction.L0+2 {
+		t.Fatalf("compacted table = %+v, want ID 3 at level 2", database.sstables[0])
+	}
+	if database.sstables[1].ID != 2 || database.sstables[1].Level != compaction.L0+2 {
+		t.Fatalf("disjoint L2 table = %+v, want ID 2 at level 2", database.sstables[1])
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if string(got) != "green" {
+		t.Fatalf("apple = %q, want green", got)
+	}
+	if _, err := os.Stat("data-0.sst"); !os.IsNotExist(err) {
+		t.Fatalf("old L1 SSTable was not removed: %v", err)
+	}
+	if _, err := os.Stat("data-1.sst"); !os.IsNotExist(err) {
+		t.Fatalf("overlapping L2 SSTable was not removed: %v", err)
+	}
+}
+
 func TestFlushManifestWriteFailureRollsBackPublishedState(t *testing.T) {
 	useTempWorkingDirectory(t)
 

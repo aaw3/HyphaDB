@@ -126,10 +126,21 @@ func (db *DB) Compact() error {
 }
 
 func (db *DB) compactLocked(threshold int) error {
-	plan, ok := compaction.PickL0Compaction(
+	// Prefer draining L0 first. If no L0 work is ready, compact one L1
+	// table into L2. The source levels use arithmetic so adding another
+	// higher level later does not require changing the level representation.
+	plan, ok := compaction.PickCompaction(
 		db.manifest.SSTables,
+		compaction.L0,
 		threshold,
 	)
+	if !ok {
+		plan, ok = compaction.PickCompaction(
+			db.manifest.SSTables,
+			compaction.L0+1,
+			threshold,
+		)
+	}
 	if !ok {
 		return nil
 	}
@@ -315,14 +326,12 @@ func (db *DB) oldestReaderLocked() (uint64, bool) {
 	return oldest, found
 }
 
-func countLevelZeroTables(tables []manifest.SSTableMetadata) int {
-	count := 0
-	for _, table := range tables {
-		if table.Level == compaction.L0 {
-			count++
-		}
+func hasCompactionWork(tables []manifest.SSTableMetadata, threshold int) bool {
+	if _, ok := compaction.PickCompaction(tables, compaction.L0, threshold); ok {
+		return true
 	}
-	return count
+	_, ok := compaction.PickCompaction(tables, compaction.L0+1, threshold)
+	return ok
 }
 
 // currentSequenceLocked returns the highest sequence currently represented by
@@ -541,7 +550,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 		db.immutableMemtables = db.immutableMemtables[1:]
 	}
 
-	shouldCompact := countLevelZeroTables(db.manifest.SSTables) >= db.compactionThreshold
+	shouldCompact := hasCompactionWork(db.manifest.SSTables, db.compactionThreshold)
 	db.mu.Unlock()
 
 	if err := wal.RemoveSegment(imm.WalID); err != nil {
@@ -550,10 +559,13 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 
 	// Compact synchronously for now since it mutates sstables and manifest.
 	db.mu.Lock()
-	if shouldCompact {
+	for shouldCompact {
 		if err := db.compactLocked(db.compactionThreshold); err != nil {
 			log.Printf("Failed to compact SSTables: %v", err)
+			break
 		}
+
+		shouldCompact = hasCompactionWork(db.manifest.SSTables, db.compactionThreshold)
 	}
 	db.mu.Unlock()
 
