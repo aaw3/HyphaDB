@@ -17,9 +17,11 @@ var ErrDeleted = errors.New("key has been deleted")
 var ErrUnsortedRecords = errors.New("records are not sorted")
 
 type SSTable struct {
-	ID    uint64
-	Level uint32
-	Path  string
+	ID          uint64
+	Level       uint32
+	Path        string
+	SmallestKey string
+	LargestKey  string
 
 	cache blockcache.Cache
 
@@ -30,17 +32,21 @@ type SSTable struct {
 }
 
 type OpenOptions struct {
-	ID         uint64
-	Level      uint32
-	BlockCache blockcache.Cache
+	ID          uint64
+	Level       uint32
+	SmallestKey string
+	LargestKey  string
+	BlockCache  blockcache.Cache
 }
 
 func New(path string, opts OpenOptions) *SSTable {
 	return &SSTable{
-		ID:    opts.ID,
-		Level: opts.Level,
-		Path:  path,
-		cache: opts.BlockCache,
+		ID:          opts.ID,
+		Level:       opts.Level,
+		Path:        path,
+		SmallestKey: opts.SmallestKey,
+		LargestKey:  opts.LargestKey,
+		cache:       opts.BlockCache,
 	}
 }
 

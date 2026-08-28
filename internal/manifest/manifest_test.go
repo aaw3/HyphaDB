@@ -14,14 +14,18 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		NextWALSegmentID: 4,
 		SSTables: []SSTableMetadata{
 			{
-				ID:    1,
-				Path:  "data-1.sst",
-				Level: 0,
+				ID:          1,
+				Path:        "data-1.sst",
+				Level:       0,
+				SmallestKey: "apple",
+				LargestKey:  "banana",
 			},
 			{
-				ID:    5,
-				Path:  "data-5.sst",
-				Level: 2,
+				ID:          5,
+				Path:        "data-5.sst",
+				Level:       2,
+				SmallestKey: "carrot",
+				LargestKey:  "zucchini",
 			},
 		},
 	}

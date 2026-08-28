@@ -109,9 +109,11 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 
 func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
 	return sstable.New(meta.Path, sstable.OpenOptions{
-		ID:         meta.ID,
-		Level:      meta.Level,
-		BlockCache: db.blockCache,
+		ID:          meta.ID,
+		Level:       meta.Level,
+		SmallestKey: meta.SmallestKey,
+		LargestKey:  meta.LargestKey,
+		BlockCache:  db.blockCache,
 	})
 }
 
@@ -129,7 +131,7 @@ func (db *DB) compactLocked() error {
 	if hasReader {
 		retention = &oldestReader
 	}
-	_, err := compaction.MergeSSTablesWithRetention(
+	compactedSSTable, err := compaction.MergeSSTablesWithRetention(
 		db.sstables,
 		compactedSSTablePath,
 		retention,
@@ -144,9 +146,11 @@ func (db *DB) compactLocked() error {
 	oldTables := db.manifest.SSTables
 	db.manifest.NextSSTableID++
 	compactedMeta := manifest.SSTableMetadata{
-		ID:    id,
-		Path:  compactedSSTablePath,
-		Level: 0,
+		ID:          id,
+		Path:        compactedSSTablePath,
+		Level:       0,
+		SmallestKey: compactedSSTable.SmallestKey,
+		LargestKey:  compactedSSTable.LargestKey,
 	}
 	db.manifest.SSTables = []manifest.SSTableMetadata{
 		compactedMeta,
@@ -169,7 +173,7 @@ func (db *DB) compactLocked() error {
 	}
 
 	oldSSTables := db.sstables
-	compactedSSTable := db.newSSTable(compactedMeta)
+	compactedSSTable = db.newSSTable(compactedMeta)
 	db.sstables = []*sstable.SSTable{compactedSSTable}
 
 	for _, sst := range oldSSTables {
@@ -423,7 +427,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	db.manifest.NextSSTableID++
 	db.mu.Unlock()
 
-	_, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
+	createdSSTable, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
 	if err != nil {
 		db.mu.Lock()
 		db.manifest.NextSSTableID = oldNextSSTableID
@@ -432,9 +436,11 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	}
 
 	meta := manifest.SSTableMetadata{
-		ID:    id,
-		Path:  sstablePath,
-		Level: 0,
+		ID:          id,
+		Path:        sstablePath,
+		Level:       0,
+		SmallestKey: createdSSTable.SmallestKey,
+		LargestKey:  createdSSTable.LargestKey,
 	}
 	sst := db.newSSTable(meta)
 

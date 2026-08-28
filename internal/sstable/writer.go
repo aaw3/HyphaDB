@@ -77,6 +77,8 @@ func CreateFromIteratorWithOptions(
 	var blockFirstKey string
 	var previousKey string
 	var previousSeq uint64
+	var smallestKey string
+	var largestKey string
 	firstRecord := true
 
 	// closure to start a new block
@@ -149,6 +151,10 @@ func CreateFromIteratorWithOptions(
 				previousSeq,
 			)
 		}
+		if firstRecord {
+			smallestKey = rec.Key
+		}
+		largestKey = rec.Key
 		previousKey = rec.Key
 		previousSeq = rec.Seq
 		firstRecord = false
@@ -253,9 +259,11 @@ func CreateFromIteratorWithOptions(
 	}
 
 	return &SSTable{
-		Path:   path,
-		index:  index,
-		filter: filter,
+		Path:        path,
+		SmallestKey: smallestKey,
+		LargestKey:  largestKey,
+		index:       index,
+		filter:      filter,
 	}, nil
 }
 

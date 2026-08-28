@@ -30,6 +30,14 @@ func TestCreateFromRecordAndGet(t *testing.T) {
 	if string(got) != "yellow" {
 		t.Fatalf("Get returned wrong value: got %q, want %q", got, "yellow")
 	}
+
+	if sst.SmallestKey != "apple" || sst.LargestKey != "carrot" {
+		t.Fatalf(
+			"key range = [%q, %q], want [apple, carrot]",
+			sst.SmallestKey,
+			sst.LargestKey,
+		)
+	}
 }
 
 func TestGetMissingKeyReturnsErrNotFound(t *testing.T) {
