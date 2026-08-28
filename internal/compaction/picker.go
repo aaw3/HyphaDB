@@ -1,8 +1,14 @@
 package compaction
 
-import "github.com/aaw3/hyphadb/internal/manifest"
+import (
+	"os"
+
+	"github.com/aaw3/hyphadb/internal/manifest"
+)
 
 const L0 uint32 = 0
+
+const baseLevelTargetBytes uint64 = 64 * 1024 * 1024
 
 // CompactionPlan identifies the tables that should be merged and the level
 // where the merged output will be placed.
@@ -36,7 +42,11 @@ func PickCompaction(
 		}
 	}
 
-	if len(source) < threshold {
+	if sourceLevel == L0 && len(source) < threshold {
+		return CompactionPlan{}, false
+	}
+	if sourceLevel > L0 && len(source) < threshold &&
+		totalTableBytes(source) < levelTargetBytes(sourceLevel) {
 		return CompactionPlan{}, false
 	}
 
@@ -119,6 +129,38 @@ func combinedRange(tables []manifest.SSTableMetadata) (string, string, bool) {
 
 func hasKeyRange(table manifest.SSTableMetadata) bool {
 	return table.SmallestKey != "" && table.LargestKey != ""
+}
+
+func levelTargetBytes(level uint32) uint64 {
+	if level == L0 {
+		return 0
+	}
+
+	target := baseLevelTargetBytes
+	for current := uint32(1); current < level; current++ {
+		if target > ^uint64(0)/10 {
+			return ^uint64(0)
+		}
+		target *= 10
+	}
+	return target
+}
+
+func totalTableBytes(tables []manifest.SSTableMetadata) uint64 {
+	var total uint64
+	for _, table := range tables {
+		size := table.SizeBytes
+		if size == 0 {
+			if info, err := os.Stat(table.Path); err == nil && info.Size() > 0 {
+				size = uint64(info.Size())
+			}
+		}
+		if ^uint64(0)-total < size {
+			return ^uint64(0)
+		}
+		total += size
+	}
+	return total
 }
 
 func rangesOverlap(leftMin, leftMax, rightMin, rightMax string) bool {

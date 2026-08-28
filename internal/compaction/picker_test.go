@@ -118,6 +118,20 @@ func TestPickCompactionWaitsForHigherLevelThreshold(t *testing.T) {
 	}
 }
 
+func TestPickCompactionUsesHigherLevelByteBudget(t *testing.T) {
+	tables := []manifest.SSTableMetadata{
+		{ID: 1, Level: L0 + 1, SizeBytes: baseLevelTargetBytes},
+	}
+
+	plan, ok := PickCompaction(tables, L0+1, 100)
+	if !ok {
+		t.Fatal("did not pick L1 compaction at byte budget")
+	}
+	if plan.SourceLevel != L0+1 || plan.TargetLevel != L0+2 {
+		t.Fatalf("plan levels = %d -> %d, want 1 -> 2", plan.SourceLevel, plan.TargetLevel)
+	}
+}
+
 func TestPickCompactionConservativelyIncludesUnknownL2Bounds(t *testing.T) {
 	tables := []manifest.SSTableMetadata{
 		{ID: 1, Level: L0 + 1, SmallestKey: "banana", LargestKey: "carrot"},
