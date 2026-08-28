@@ -20,6 +20,7 @@ type SSTable struct {
 	ID          uint64
 	Level       uint32
 	Path        string
+	SizeBytes   uint64
 	SmallestKey string
 	LargestKey  string
 
@@ -34,6 +35,7 @@ type SSTable struct {
 type OpenOptions struct {
 	ID          uint64
 	Level       uint32
+	SizeBytes   uint64
 	SmallestKey string
 	LargestKey  string
 	BlockCache  blockcache.Cache
@@ -44,6 +46,7 @@ func New(path string, opts OpenOptions) *SSTable {
 		ID:          opts.ID,
 		Level:       opts.Level,
 		Path:        path,
+		SizeBytes:   opts.SizeBytes,
 		SmallestKey: opts.SmallestKey,
 		LargestKey:  opts.LargestKey,
 		cache:       opts.BlockCache,

@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -20,6 +21,16 @@ func TestCreateFromRecordAndGet(t *testing.T) {
 	sst, err := CreateFromRecords(records, path, DefaultBlockSize)
 	if err != nil {
 		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+	if sst.SizeBytes == 0 {
+		t.Fatal("SSTable size is zero")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat SSTable: %v", err)
+	}
+	if sst.SizeBytes != uint64(info.Size()) {
+		t.Fatalf("SSTable size = %d, want %d", sst.SizeBytes, info.Size())
 	}
 
 	got, err := sst.Get("banana")

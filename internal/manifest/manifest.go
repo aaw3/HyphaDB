@@ -15,6 +15,7 @@ type SSTableMetadata struct {
 	ID          uint64
 	Path        string
 	Level       uint32
+	SizeBytes   uint64
 	SmallestKey string
 	LargestKey  string
 }

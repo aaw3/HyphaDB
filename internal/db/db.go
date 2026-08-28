@@ -85,8 +85,16 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		activeReaders:       make(map[uint64]int),
 	}
 
-	for _, table := range mf.SSTables {
-		database.sstables = append(database.sstables, database.newSSTable(table))
+	for i := range mf.SSTables {
+		table := &mf.SSTables[i]
+		// SizeBytes was added after the original manifest format. Recover it
+		// from the file when opening an older manifest.
+		if table.SizeBytes == 0 {
+			if info, statErr := os.Stat(table.Path); statErr == nil {
+				table.SizeBytes = uint64(info.Size())
+			}
+		}
+		database.sstables = append(database.sstables, database.newSSTable(*table))
 	}
 
 	sstableMaxSeq, err := maxSeqFromSSTables(database.sstables)
@@ -111,6 +119,7 @@ func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
 	return sstable.New(meta.Path, sstable.OpenOptions{
 		ID:          meta.ID,
 		Level:       meta.Level,
+		SizeBytes:   meta.SizeBytes,
 		SmallestKey: meta.SmallestKey,
 		LargestKey:  meta.LargestKey,
 		BlockCache:  db.blockCache,
@@ -188,6 +197,7 @@ func (db *DB) compactLocked(threshold int) error {
 		ID:          id,
 		Path:        compactedSSTablePath,
 		Level:       plan.TargetLevel,
+		SizeBytes:   compactedSSTable.SizeBytes,
 		SmallestKey: compactedSSTable.SmallestKey,
 		LargestKey:  compactedSSTable.LargestKey,
 	}
@@ -515,6 +525,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 		ID:          id,
 		Path:        sstablePath,
 		Level:       0,
+		SizeBytes:   createdSSTable.SizeBytes,
 		SmallestKey: createdSSTable.SmallestKey,
 		LargestKey:  createdSSTable.LargestKey,
 	}

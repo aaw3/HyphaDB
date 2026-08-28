@@ -258,8 +258,14 @@ func CreateFromIteratorWithOptions(
 		return nil, err
 	}
 
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
 	return &SSTable{
 		Path:        path,
+		SizeBytes:   uint64(fileInfo.Size()),
 		SmallestKey: smallestKey,
 		LargestKey:  largestKey,
 		index:       index,
