@@ -203,6 +203,9 @@ func TestCompactionPersistsSSTableMetadata(t *testing.T) {
 			table,
 		)
 	}
+	if table.SizeBytes == 0 {
+		t.Fatal("compacted SSTable metadata has zero SizeBytes")
+	}
 
 	reopened, err := New(2, 2)
 	if err != nil {
