@@ -132,6 +132,22 @@ func TestPickCompactionUsesHigherLevelByteBudget(t *testing.T) {
 	}
 }
 
+func TestPickCompactionPrefersLargestHigherLevelTable(t *testing.T) {
+	tables := []manifest.SSTableMetadata{
+		{ID: 1, Level: L0 + 1, SizeBytes: 10, SmallestKey: "apple", LargestKey: "banana"},
+		{ID: 2, Level: L0 + 1, SizeBytes: 100, SmallestKey: "date", LargestKey: "fig"},
+		{ID: 3, Level: L0 + 2, SizeBytes: 1, SmallestKey: "date", LargestKey: "fig"},
+	}
+
+	plan, ok := PickCompaction(tables, L0+1, 2)
+	if !ok {
+		t.Fatal("did not pick L1 compaction")
+	}
+	if len(plan.Inputs) != 2 || plan.Inputs[0].ID != 2 || plan.Inputs[1].ID != 3 {
+		t.Fatalf("input tables = %+v, want largest L1 table and overlapping L2 table", plan.Inputs)
+	}
+}
+
 func TestPickCompactionConservativelyIncludesUnknownL2Bounds(t *testing.T) {
 	tables := []manifest.SSTableMetadata{
 		{ID: 1, Level: L0 + 1, SmallestKey: "banana", LargestKey: "carrot"},

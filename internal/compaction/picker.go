@@ -59,8 +59,9 @@ func PickCompaction(
 	if sourceLevel != L0 {
 		// Higher levels are maintained as non-overlapping runs. Selecting one
 		// table keeps each compaction bounded while still preserving the
-		// overlap invariant with the next level.
-		selected = source[:1]
+		// overlap invariant with the next level. Prefer the largest table so
+		// byte-based pressure is reduced as quickly as possible.
+		selected = []manifest.SSTableMetadata{largestTable(source)}
 	}
 	plan.Inputs = append(plan.Inputs, selected...)
 
@@ -90,6 +91,19 @@ func PickCompaction(
 	}
 
 	return plan, true
+}
+
+func largestTable(tables []manifest.SSTableMetadata) manifest.SSTableMetadata {
+	largest := tables[0]
+	largestSize := tableBytes(largest)
+	for _, table := range tables[1:] {
+		size := tableBytes(table)
+		if size > largestSize {
+			largest = table
+			largestSize = size
+		}
+	}
+	return largest
 }
 
 // PickL0Compaction is kept as a convenience wrapper for callers that
@@ -149,18 +163,23 @@ func levelTargetBytes(level uint32) uint64 {
 func totalTableBytes(tables []manifest.SSTableMetadata) uint64 {
 	var total uint64
 	for _, table := range tables {
-		size := table.SizeBytes
-		if size == 0 {
-			if info, err := os.Stat(table.Path); err == nil && info.Size() > 0 {
-				size = uint64(info.Size())
-			}
-		}
+		size := tableBytes(table)
 		if ^uint64(0)-total < size {
 			return ^uint64(0)
 		}
 		total += size
 	}
 	return total
+}
+
+func tableBytes(table manifest.SSTableMetadata) uint64 {
+	if table.SizeBytes != 0 {
+		return table.SizeBytes
+	}
+	if info, err := os.Stat(table.Path); err == nil && info.Size() > 0 {
+		return uint64(info.Size())
+	}
+	return 0
 }
 
 func rangesOverlap(leftMin, leftMax, rightMin, rightMax string) bool {

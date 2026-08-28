@@ -717,6 +717,10 @@ func TestFlushAutomaticallyCompactsEligibleL1Tables(t *testing.T) {
 	createTable(0, compaction.L0+1, "data-0.sst", "apple", "red")
 	createTable(1, compaction.L0+1, "data-1.sst", "banana", "yellow")
 	createTable(2, compaction.L0+2, "data-2.sst", "apple", "green")
+	// Make the L1 table overlapping the L2 table the selected largest
+	// candidate, independent of the filesystem's encoded file sizes.
+	database.manifest.SSTables[0].SizeBytes = 100
+	database.manifest.SSTables[1].SizeBytes = 10
 	database.manifest.NextSSTableID = 3
 
 	flushed := memtable.New()
