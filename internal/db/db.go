@@ -120,10 +120,38 @@ func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
 func (db *DB) Compact() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	return db.compactLocked()
+	// An explicit compaction compacts available L0 work even when the
+	// automatic threshold has not been reached.
+	return db.compactLocked(1)
 }
 
-func (db *DB) compactLocked() error {
+func (db *DB) compactLocked(threshold int) error {
+	plan, ok := compaction.PickL0Compaction(
+		db.manifest.SSTables,
+		threshold,
+	)
+	if !ok {
+		return nil
+	}
+
+	selectedIDs := make(map[uint64]struct{}, len(plan.Inputs))
+	for _, table := range plan.Inputs {
+		selectedIDs[table.ID] = struct{}{}
+	}
+
+	inputTables := make([]*sstable.SSTable, 0, len(plan.Inputs))
+	for _, table := range plan.Inputs {
+		for _, sst := range db.sstables {
+			if sst.ID == table.ID {
+				inputTables = append(inputTables, sst)
+				break
+			}
+		}
+	}
+	if len(inputTables) != len(plan.Inputs) {
+		return fmt.Errorf("compaction plan references missing SSTable")
+	}
+
 	id := db.manifest.NextSSTableID
 	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
 	oldestReader, hasReader := db.oldestReaderLocked()
@@ -132,7 +160,7 @@ func (db *DB) compactLocked() error {
 		retention = &oldestReader
 	}
 	compactedSSTable, err := compaction.MergeSSTablesWithRetention(
-		db.sstables,
+		inputTables,
 		compactedSSTablePath,
 		retention,
 	)
@@ -148,13 +176,25 @@ func (db *DB) compactLocked() error {
 	compactedMeta := manifest.SSTableMetadata{
 		ID:          id,
 		Path:        compactedSSTablePath,
-		Level:       0,
+		Level:       plan.TargetLevel,
 		SmallestKey: compactedSSTable.SmallestKey,
 		LargestKey:  compactedSSTable.LargestKey,
 	}
-	db.manifest.SSTables = []manifest.SSTableMetadata{
-		compactedMeta,
+	newMetadata := make([]manifest.SSTableMetadata, 0,
+		len(db.manifest.SSTables)-len(plan.Inputs)+1,
+	)
+	inserted := false
+	for _, table := range db.manifest.SSTables {
+		if _, selected := selectedIDs[table.ID]; selected {
+			if !inserted {
+				newMetadata = append(newMetadata, compactedMeta)
+				inserted = true
+			}
+			continue
+		}
+		newMetadata = append(newMetadata, table)
 	}
+	db.manifest.SSTables = newMetadata
 
 	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
 		// Restore in-memory manifest since persistence failed
@@ -172,11 +212,28 @@ func (db *DB) compactLocked() error {
 		return err
 	}
 
+	newSSTables := make([]*sstable.SSTable, 0,
+		len(db.sstables)-len(inputTables)+1,
+	)
+	inserted = false
+	for _, sst := range db.sstables {
+		if _, selected := selectedIDs[sst.ID]; selected {
+			if !inserted {
+				compactedSSTable = db.newSSTable(compactedMeta)
+				newSSTables = append(newSSTables, compactedSSTable)
+				inserted = true
+			}
+			continue
+		}
+		newSSTables = append(newSSTables, sst)
+	}
 	oldSSTables := db.sstables
-	compactedSSTable = db.newSSTable(compactedMeta)
-	db.sstables = []*sstable.SSTable{compactedSSTable}
+	db.sstables = newSSTables
 
 	for _, sst := range oldSSTables {
+		if _, selected := selectedIDs[sst.ID]; !selected {
+			continue
+		}
 		if err := os.Remove(sst.Path); err != nil {
 			log.Printf("failed while deleting old SSTable %s: %v",
 				sst.Path,
@@ -256,6 +313,16 @@ func (db *DB) oldestReaderLocked() (uint64, bool) {
 	}
 
 	return oldest, found
+}
+
+func countLevelZeroTables(tables []manifest.SSTableMetadata) int {
+	count := 0
+	for _, table := range tables {
+		if table.Level == compaction.L0 {
+			count++
+		}
+	}
+	return count
 }
 
 // currentSequenceLocked returns the highest sequence currently represented by
@@ -474,7 +541,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 		db.immutableMemtables = db.immutableMemtables[1:]
 	}
 
-	shouldCompact := len(db.sstables) >= db.compactionThreshold
+	shouldCompact := countLevelZeroTables(db.manifest.SSTables) >= db.compactionThreshold
 	db.mu.Unlock()
 
 	if err := wal.RemoveSegment(imm.WalID); err != nil {
@@ -484,7 +551,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	// Compact synchronously for now since it mutates sstables and manifest.
 	db.mu.Lock()
 	if shouldCompact {
-		if err := db.compactLocked(); err != nil {
+		if err := db.compactLocked(db.compactionThreshold); err != nil {
 			log.Printf("Failed to compact SSTables: %v", err)
 		}
 	}

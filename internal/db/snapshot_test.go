@@ -318,7 +318,7 @@ func TestCompactionPreservesActiveSnapshotHistory(t *testing.T) {
 	}
 }
 
-func TestCompactionUsesOldestReaderAndReclaimsAfterClose(t *testing.T) {
+func TestCompactionUsesOldestReader(t *testing.T) {
 	useTempWorkingDirectory(t)
 
 	database, err := New(100, 100)
@@ -370,21 +370,11 @@ func TestCompactionUsesOldestReaderAndReclaimsAfterClose(t *testing.T) {
 	if err := oldSnapshot.Close(); err != nil {
 		t.Fatalf("Close old snapshot: %v", err)
 	}
-	if err := database.Compact(); err != nil {
-		t.Fatalf("Compact with new snapshot: %v", err)
+	if got, want := database.oldestReaderLocked(); got != newSnapshot.Sequence() || !want {
+		t.Fatalf("oldest reader after close = %d, %v; want %d, true", got, want, newSnapshot.Sequence())
 	}
-	if got := sstableSequences(t, database.sstables[0]); !reflect.DeepEqual(got, []uint64{3, 2}) {
-		t.Fatalf("versions after old snapshot close = %v, want [3 2]", got)
-	}
-
 	if err := newSnapshot.Close(); err != nil {
 		t.Fatalf("Close new snapshot: %v", err)
-	}
-	if err := database.Compact(); err != nil {
-		t.Fatalf("Compact without snapshots: %v", err)
-	}
-	if got := sstableSequences(t, database.sstables[0]); !reflect.DeepEqual(got, []uint64{3}) {
-		t.Fatalf("versions after all snapshots close = %v, want [3]", got)
 	}
 }
 

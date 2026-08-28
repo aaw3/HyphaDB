@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
+	"github.com/aaw3/hyphadb/internal/compaction"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -511,6 +512,69 @@ func TestCompactionPurgesOldTableCacheEntries(t *testing.T) {
 
 	if _, ok := cache.Get(blockcache.Key{TableID: 2, Offset: 0}); !ok {
 		t.Fatal("expected compacted table cache entry")
+	}
+}
+
+func TestCompactionPreservesDisjointL1Table(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create L0 SSTable: %v", err)
+	}
+	_, err = sstable.CreateFromRecords([]record.Record{
+		{Key: "zebra", Seq: 2, Entry: record.Entry{Value: []byte("black-white")}},
+	}, "data-1.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create L1 SSTable: %v", err)
+	}
+
+	database.sstables = []*sstable.SSTable{
+		database.newSSTable(manifest.SSTableMetadata{
+			ID: 0, Path: "data-0.sst", Level: compaction.L0,
+			SmallestKey: "apple", LargestKey: "apple",
+		}),
+		database.newSSTable(manifest.SSTableMetadata{
+			ID: 1, Path: "data-1.sst", Level: compaction.L0 + 1,
+			SmallestKey: "zebra", LargestKey: "zebra",
+		}),
+	}
+	database.manifest.NextSSTableID = 2
+	database.manifest.SSTables = []manifest.SSTableMetadata{
+		{ID: 0, Path: "data-0.sst", Level: compaction.L0, SmallestKey: "apple", LargestKey: "apple"},
+		{ID: 1, Path: "data-1.sst", Level: compaction.L0 + 1, SmallestKey: "zebra", LargestKey: "zebra"},
+	}
+
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if len(database.sstables) != 2 {
+		t.Fatalf("SSTables after compaction = %d, want 2", len(database.sstables))
+	}
+	if database.sstables[0].Level != compaction.L0+1 {
+		t.Fatalf("compacted table level = %d, want 1", database.sstables[0].Level)
+	}
+	if database.sstables[1].ID != 1 || database.sstables[1].Level != compaction.L0+1 {
+		t.Fatalf("disjoint table = %+v, want ID 1 at level 1", database.sstables[1])
+	}
+
+	if _, err := database.Get("apple"); err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if _, err := database.Get("zebra"); err != nil {
+		t.Fatalf("Get zebra: %v", err)
+	}
+	if _, err := os.Stat("data-1.sst"); err != nil {
+		t.Fatalf("disjoint L1 table was removed: %v", err)
 	}
 }
 
