@@ -762,6 +762,79 @@ func TestFlushAutomaticallyCompactsEligibleL1Tables(t *testing.T) {
 	}
 }
 
+func TestFlushRepeatsHigherLevelCompactionUntilBelowThreshold(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 2)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	for id, key := range []string{"apple", "banana", "cherry"} {
+		path := fmt.Sprintf("data-%d.sst", id)
+		_, err := sstable.CreateFromRecords([]record.Record{{
+			Key:   key,
+			Seq:   uint64(id + 1),
+			Entry: record.Entry{Value: []byte(key)},
+		}}, path, sstable.DefaultBlockSize)
+		if err != nil {
+			t.Fatalf("create SSTable %d: %v", id, err)
+		}
+		meta := manifest.SSTableMetadata{
+			ID:          uint64(id),
+			Path:        path,
+			Level:       compaction.L0 + 1,
+			SmallestKey: key,
+			LargestKey:  key,
+		}
+		database.sstables = append(database.sstables, database.newSSTable(meta))
+		database.manifest.SSTables = append(database.manifest.SSTables, meta)
+	}
+	database.manifest.NextSSTableID = 3
+
+	flushed := memtable.New()
+	flushed.Put(record.Record{
+		Key:   "date",
+		Seq:   10,
+		Entry: record.Entry{Value: []byte("date")},
+	})
+	if err := database.flushImmutableMemtable(&memtable.ImmutableMemTable{
+		MemTable: flushed,
+		WalID:    99,
+	}); err != nil {
+		t.Fatalf("flushImmutableMemtable: %v", err)
+	}
+
+	var l1Count, l2Count, l0Count int
+	for _, table := range database.manifest.SSTables {
+		switch table.Level {
+		case compaction.L0:
+			l0Count++
+		case compaction.L0 + 1:
+			l1Count++
+		case compaction.L0 + 2:
+			l2Count++
+		}
+	}
+	if l1Count != 1 || l2Count != 2 || l0Count != 1 {
+		t.Fatalf("level counts = L0:%d L1:%d L2:%d, want L0:1 L1:1 L2:2", l0Count, l1Count, l2Count)
+	}
+
+	if _, err := database.Get("apple"); err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if _, err := database.Get("banana"); err != nil {
+		t.Fatalf("Get banana: %v", err)
+	}
+	if _, err := database.Get("cherry"); err != nil {
+		t.Fatalf("Get cherry: %v", err)
+	}
+	if _, err := database.Get("date"); err != nil {
+		t.Fatalf("Get date: %v", err)
+	}
+}
+
 func TestFlushManifestWriteFailureRollsBackPublishedState(t *testing.T) {
 	useTempWorkingDirectory(t)
 
