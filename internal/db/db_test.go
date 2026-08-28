@@ -220,6 +220,46 @@ func TestCompactionPersistsSSTableMetadata(t *testing.T) {
 	}
 }
 
+func TestReopenRecoversMissingSSTableSizeMetadata(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	_, err := sstable.CreateFromRecords([]record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create SSTable: %v", err)
+	}
+
+	stored := &manifest.Manifest{
+		NextSSTableID:    1,
+		NextWALSegmentID: 0,
+		SSTables: []manifest.SSTableMetadata{{
+			ID:   0,
+			Path: "data-0.sst",
+			// SizeBytes intentionally remains zero to represent an older
+			// manifest written before size metadata existed.
+		}},
+	}
+	if err := manifest.Write("MANIFEST", stored); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	info, err := os.Stat("data-0.sst")
+	if err != nil {
+		t.Fatalf("stat SSTable: %v", err)
+	}
+	got := database.manifest.SSTables[0].SizeBytes
+	if got != uint64(info.Size()) {
+		t.Fatalf("recovered SizeBytes = %d, want %d", got, info.Size())
+	}
+}
+
 func TestRecoveredSSTablesUseDBBlockCache(t *testing.T) {
 	useTempWorkingDirectory(t)
 
