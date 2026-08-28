@@ -12,52 +12,64 @@ type CompactionPlan struct {
 	Inputs      []manifest.SSTableMetadata
 }
 
-// PickL0Compaction selects an L0-to-L1 compaction once L0 reaches threshold.
-// All selected L0 tables are included because L0 tables may overlap. Only L1
-// tables overlapping the combined L0 key range are included.
+// PickCompaction selects a compaction for sourceLevel once that level reaches
+// threshold. L0 is handled specially because its tables may overlap: all L0
+// tables are selected and overlapping tables from L1 are added. Higher levels
+// select one source table and add overlapping tables from the next level.
 //
-// Tables with missing bounds are handled conservatively: all L1 tables are
-// included because excluding an unknown overlapping table would be unsafe.
-func PickL0Compaction(
+// Tables with missing bounds are handled conservatively: all tables from the
+// target level are included because excluding an unknown overlapping table
+// would be unsafe.
+func PickCompaction(
 	tables []manifest.SSTableMetadata,
+	sourceLevel uint32,
 	threshold int,
 ) (CompactionPlan, bool) {
 	if threshold <= 0 {
 		return CompactionPlan{}, false
 	}
 
-	var l0 []manifest.SSTableMetadata
+	var source []manifest.SSTableMetadata
 	for _, table := range tables {
-		if table.Level == L0 {
-			l0 = append(l0, table)
+		if table.Level == sourceLevel {
+			source = append(source, table)
 		}
 	}
 
-	if len(l0) < threshold {
+	if len(source) < threshold {
 		return CompactionPlan{}, false
 	}
 
 	plan := CompactionPlan{
-		SourceLevel: L0,
-		TargetLevel: L0 + 1,
-		Inputs:      append([]manifest.SSTableMetadata(nil), l0...),
+		SourceLevel: sourceLevel,
+		TargetLevel: sourceLevel + 1,
 	}
 
-	minKey, maxKey, knownRange := combinedRange(l0)
-	allL1RangesKnown := true
+	selected := source
+	if sourceLevel != L0 {
+		// Higher levels are maintained as non-overlapping runs. Selecting one
+		// table keeps each compaction bounded while still preserving the
+		// overlap invariant with the next level.
+		selected = source[:1]
+	}
+	plan.Inputs = append(plan.Inputs, selected...)
+
+	minKey, maxKey, knownRange := combinedRange(selected)
+	targetLevel := sourceLevel + 1
+	allTargetRangesKnown := true
 	for _, table := range tables {
-		if table.Level == L0+1 && !hasKeyRange(table) {
-			allL1RangesKnown = false
+		if table.Level == targetLevel && !hasKeyRange(table) {
+			allTargetRangesKnown = false
 			break
 		}
 	}
 
 	for _, table := range tables {
-		if table.Level != L0+1 {
+		if table.Level != targetLevel {
 			continue
 		}
 
-		if !knownRange || !allL1RangesKnown || rangesOverlap(
+		if !knownRange || !allTargetRangesKnown || rangesOverlap(
 			minKey,
 			maxKey,
 			table.SmallestKey,
@@ -68,6 +80,15 @@ func PickL0Compaction(
 	}
 
 	return plan, true
+}
+
+// PickL0Compaction is kept as a convenience wrapper for callers that
+// explicitly request the L0 compaction policy.
+func PickL0Compaction(
+	tables []manifest.SSTableMetadata,
+	threshold int,
+) (CompactionPlan, bool) {
+	return PickCompaction(tables, L0, threshold)
 }
 
 func combinedRange(tables []manifest.SSTableMetadata) (string, string, bool) {

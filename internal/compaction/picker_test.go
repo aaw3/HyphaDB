@@ -80,3 +80,62 @@ func TestPickL0CompactionIgnoresOtherLevels(t *testing.T) {
 		t.Fatalf("input tables = %+v, want only L0 table", plan.Inputs)
 	}
 }
+
+func TestPickCompactionSelectsL1AndOverlappingL2Tables(t *testing.T) {
+	tables := []manifest.SSTableMetadata{
+		{ID: 1, Level: L0 + 1, SmallestKey: "apple", LargestKey: "banana"},
+		{ID: 2, Level: L0 + 1, SmallestKey: "date", LargestKey: "fig"},
+		{ID: 3, Level: L0 + 2, SmallestKey: "aardvark", LargestKey: "apricot"},
+		{ID: 4, Level: L0 + 2, SmallestKey: "carrot", LargestKey: "coconut"},
+		{ID: 5, Level: L0 + 2, SmallestKey: "zebra", LargestKey: "zucchini"},
+	}
+
+	plan, ok := PickCompaction(tables, L0+1, 2)
+	if !ok {
+		t.Fatal("did not pick L1 compaction at threshold")
+	}
+	if plan.SourceLevel != L0+1 || plan.TargetLevel != L0+2 {
+		t.Fatalf("plan levels = %d -> %d, want 1 -> 2", plan.SourceLevel, plan.TargetLevel)
+	}
+
+	var got []uint64
+	for _, table := range plan.Inputs {
+		got = append(got, table.ID)
+	}
+	want := []uint64{1, 3}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("input IDs = %v, want %v", got, want)
+	}
+}
+
+func TestPickCompactionWaitsForHigherLevelThreshold(t *testing.T) {
+	tables := []manifest.SSTableMetadata{
+		{ID: 1, Level: L0 + 1, SmallestKey: "apple", LargestKey: "banana"},
+	}
+
+	if _, ok := PickCompaction(tables, L0+1, 2); ok {
+		t.Fatal("picked L1 compaction below threshold")
+	}
+}
+
+func TestPickCompactionConservativelyIncludesUnknownL2Bounds(t *testing.T) {
+	tables := []manifest.SSTableMetadata{
+		{ID: 1, Level: L0 + 1, SmallestKey: "banana", LargestKey: "carrot"},
+		{ID: 2, Level: L0 + 2, SmallestKey: "", LargestKey: ""},
+		{ID: 3, Level: L0 + 2, SmallestKey: "zebra", LargestKey: "zucchini"},
+	}
+
+	plan, ok := PickCompaction(tables, L0+1, 1)
+	if !ok {
+		t.Fatal("did not pick L1 compaction")
+	}
+
+	var got []uint64
+	for _, table := range plan.Inputs {
+		got = append(got, table.ID)
+	}
+	want := []uint64{1, 2, 3}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("input IDs = %v, want %v", got, want)
+	}
+}
