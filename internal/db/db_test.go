@@ -736,6 +736,8 @@ func TestFlushAutomaticallyCompactsEligibleL1Tables(t *testing.T) {
 	if err := database.flushImmutableMemtable(imm); err != nil {
 		t.Fatalf("flushImmutableMemtable: %v", err)
 	}
+	database.signalCompaction()
+	<-database.compactionDone
 
 	var levels []uint32
 	for _, table := range database.sstables {
@@ -808,6 +810,8 @@ func TestFlushRepeatsHigherLevelCompactionUntilBelowThreshold(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("flushImmutableMemtable: %v", err)
 	}
+	database.signalCompaction()
+	<-database.compactionDone
 
 	var l1Count, l2Count, l0Count int
 	for _, table := range database.manifest.SSTables {

@@ -29,11 +29,14 @@ type DB struct {
 	compactionThreshold int
 	nextSeq             uint64
 
-	mu            sync.RWMutex
-	flushSignal   chan struct{}
-	activeReaders map[uint64]int
-	closed        bool
-	flushWG       sync.WaitGroup
+	mu               sync.RWMutex
+	flushSignal      chan struct{}
+	compactionSignal chan struct{}
+	compactionDone   chan struct{}
+	activeReaders    map[uint64]int
+	closed           bool
+	flushWG          sync.WaitGroup
+	compactionWG     sync.WaitGroup
 }
 
 var ErrClosed = errors.New("database is closed")
@@ -82,6 +85,8 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 		manifestPath:        manifestPath,
 		compactionThreshold: compactionThreshold,
 		flushSignal:         make(chan struct{}, 1),
+		compactionSignal:    make(chan struct{}, 1),
+		compactionDone:      make(chan struct{}, 1),
 		activeReaders:       make(map[uint64]int),
 	}
 
@@ -111,6 +116,8 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 
 	database.flushWG.Add(1)
 	go database.flushLoop()
+	database.compactionWG.Add(1)
+	go database.compactionLoop()
 
 	return database, nil
 }
@@ -468,6 +475,13 @@ func (db *DB) signalFlush() {
 	}
 }
 
+func (db *DB) signalCompaction() {
+	select {
+	case db.compactionSignal <- struct{}{}:
+	default:
+	}
+}
+
 func (db *DB) flushLoop() {
 	defer db.flushWG.Done()
 
@@ -477,6 +491,27 @@ func (db *DB) flushLoop() {
 
 	// run one last flush after the channel closed
 	db.flushUntilEmpty()
+	db.signalCompaction()
+}
+
+func (db *DB) compactionLoop() {
+	defer db.compactionWG.Done()
+
+	for range db.compactionSignal {
+		db.mu.Lock()
+		for hasCompactionWork(db.manifest.SSTables, db.compactionThreshold) {
+			if err := db.compactLocked(db.compactionThreshold); err != nil {
+				log.Printf("Failed to compact SSTables: %v", err)
+				break
+			}
+		}
+		db.mu.Unlock()
+
+		select {
+		case db.compactionDone <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (db *DB) flushUntilEmpty() {
@@ -561,24 +596,15 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 		db.immutableMemtables = db.immutableMemtables[1:]
 	}
 
-	shouldCompact := hasCompactionWork(db.manifest.SSTables, db.compactionThreshold)
 	db.mu.Unlock()
 
 	if err := wal.RemoveSegment(imm.WalID); err != nil {
 		return err
 	}
 
-	// Compact synchronously for now since it mutates sstables and manifest.
-	db.mu.Lock()
-	for shouldCompact {
-		if err := db.compactLocked(db.compactionThreshold); err != nil {
-			log.Printf("Failed to compact SSTables: %v", err)
-			break
-		}
-
-		shouldCompact = hasCompactionWork(db.manifest.SSTables, db.compactionThreshold)
-	}
-	db.mu.Unlock()
+	// Compaction runs independently from flushing. It remains serialized by
+	// the compaction worker until the merge phase is made lock-free.
+	db.signalCompaction()
 
 	return nil
 }
@@ -596,6 +622,8 @@ func (db *DB) Close() error {
 	db.mu.Unlock()
 
 	db.flushWG.Wait()
+	close(db.compactionSignal)
+	db.compactionWG.Wait()
 
 	if db.wal != nil {
 		return db.wal.Close()
