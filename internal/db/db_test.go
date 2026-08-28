@@ -643,6 +643,81 @@ func TestCompactionMergesL1IntoL2(t *testing.T) {
 	}
 }
 
+func TestFlushAutomaticallyCompactsEligibleL1Tables(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 2)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	createTable := func(id uint64, level uint32, path, key, value string) {
+		t.Helper()
+		_, err := sstable.CreateFromRecords([]record.Record{{
+			Key:   key,
+			Seq:   id + 1,
+			Entry: record.Entry{Value: []byte(value)},
+		}}, path, sstable.DefaultBlockSize)
+		if err != nil {
+			t.Fatalf("create SSTable %d: %v", id, err)
+		}
+
+		meta := manifest.SSTableMetadata{
+			ID:          id,
+			Path:        path,
+			Level:       level,
+			SmallestKey: key,
+			LargestKey:  key,
+		}
+		database.sstables = append(database.sstables, database.newSSTable(meta))
+		database.manifest.SSTables = append(database.manifest.SSTables, meta)
+	}
+
+	createTable(0, compaction.L0+1, "data-0.sst", "apple", "red")
+	createTable(1, compaction.L0+1, "data-1.sst", "banana", "yellow")
+	createTable(2, compaction.L0+2, "data-2.sst", "apple", "green")
+	database.manifest.NextSSTableID = 3
+
+	flushed := memtable.New()
+	flushed.Put(record.Record{
+		Key:   "cherry",
+		Seq:   10,
+		Entry: record.Entry{Value: []byte("red")},
+	})
+	imm := &memtable.ImmutableMemTable{MemTable: flushed, WalID: 99}
+	if err := database.flushImmutableMemtable(imm); err != nil {
+		t.Fatalf("flushImmutableMemtable: %v", err)
+	}
+
+	var levels []uint32
+	for _, table := range database.sstables {
+		levels = append(levels, table.Level)
+	}
+	wantLevels := []uint32{compaction.L0 + 2, compaction.L0 + 1, compaction.L0}
+	if !reflect.DeepEqual(levels, wantLevels) {
+		t.Fatalf("SSTable levels after flush = %v, want %v", levels, wantLevels)
+	}
+
+	if _, err := os.Stat("data-0.sst"); !os.IsNotExist(err) {
+		t.Fatalf("compacted L1 SSTable was not removed: %v", err)
+	}
+	if _, err := os.Stat("data-1.sst"); err != nil {
+		t.Fatalf("unselected L1 SSTable was removed: %v", err)
+	}
+	if _, err := os.Stat("data-2.sst"); !os.IsNotExist(err) {
+		t.Fatalf("overlapping L2 SSTable was not removed: %v", err)
+	}
+
+	got, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get apple: %v", err)
+	}
+	if string(got) != "green" {
+		t.Fatalf("apple = %q, want green", got)
+	}
+}
+
 func TestFlushManifestWriteFailureRollsBackPublishedState(t *testing.T) {
 	useTempWorkingDirectory(t)
 
