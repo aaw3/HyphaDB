@@ -16,6 +16,8 @@ type Iterator struct {
 	recordIndex  int
 	current      record.Record
 	err          error
+	refHeld      bool
+	closed       bool
 }
 
 // Compile-time check that *Iterator satisfies the shared record iterator API.
@@ -23,12 +25,18 @@ var _ record.Iterator = (*Iterator)(nil)
 var _ record.SeekableIterator = (*Iterator)(nil)
 
 func (s *SSTable) Iterator() (*Iterator, error) {
+	if err := s.Acquire(); err != nil {
+		return nil, err
+	}
+
 	if err := s.loadMetadata(); err != nil {
+		s.Release()
 		return nil, err
 	}
 
 	file, err := os.Open(s.Path)
 	if err != nil {
+		s.Release()
 		return nil, err
 	}
 
@@ -42,6 +50,7 @@ func (s *SSTable) Iterator() (*Iterator, error) {
 		index:       index,
 		blockIndex:  -1,
 		recordIndex: -1,
+		refHeld:     true,
 	}, nil
 }
 
@@ -143,8 +152,18 @@ func (it *Iterator) Err() error {
 }
 
 func (it *Iterator) Close() error {
-	if it.file == nil {
+	if it.closed {
 		return nil
 	}
-	return it.file.Close()
+	it.closed = true
+	var err error
+	if it.file != nil {
+		err = it.file.Close()
+		it.file = nil
+	}
+	if it.refHeld {
+		it.sst.Release()
+		it.refHeld = false
+	}
+	return err
 }

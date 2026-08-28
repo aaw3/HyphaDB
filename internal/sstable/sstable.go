@@ -15,6 +15,7 @@ import (
 var ErrNotFound = errors.New("key not found")
 var ErrDeleted = errors.New("key has been deleted")
 var ErrUnsortedRecords = errors.New("records are not sorted")
+var ErrRetired = errors.New("SSTable is retired")
 
 type SSTable struct {
 	ID          uint64
@@ -30,6 +31,11 @@ type SSTable struct {
 	metaLoaded bool
 	index      []IndexEntry
 	filter     *bloom.Filter
+
+	refMu    sync.Mutex
+	refs     int
+	retired  bool
+	noRefsCh chan struct{}
 }
 
 type OpenOptions struct {
@@ -50,7 +56,50 @@ func New(path string, opts OpenOptions) *SSTable {
 		SmallestKey: opts.SmallestKey,
 		LargestKey:  opts.LargestKey,
 		cache:       opts.BlockCache,
+		noRefsCh:    make(chan struct{}),
 	}
+}
+
+// Acquire retains the SSTable for a reader or background operation.
+func (s *SSTable) Acquire() error {
+	s.refMu.Lock()
+	defer s.refMu.Unlock()
+	if s.retired {
+		return ErrRetired
+	}
+	if s.refs == 0 {
+		s.noRefsCh = make(chan struct{})
+	}
+	s.refs++
+	return nil
+}
+
+// Release drops a previously acquired SSTable reference.
+func (s *SSTable) Release() {
+	s.refMu.Lock()
+	defer s.refMu.Unlock()
+	if s.refs == 0 {
+		return
+	}
+	s.refs--
+	if s.refs == 0 {
+		close(s.noRefsCh)
+	}
+}
+
+// Retire prevents new references and returns a channel closed after existing
+// readers release the SSTable.
+func (s *SSTable) Retire() <-chan struct{} {
+	s.refMu.Lock()
+	defer s.refMu.Unlock()
+	if s.retired {
+		return s.noRefsCh
+	}
+	s.retired = true
+	if s.refs == 0 {
+		close(s.noRefsCh)
+	}
+	return s.noRefsCh
 }
 
 func (s *SSTable) Get(key string) ([]byte, error) {
