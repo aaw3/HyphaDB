@@ -27,11 +27,19 @@ type Segment struct {
 }
 
 func SegmentPath(id uint64) string {
-	return fmt.Sprintf("wal-%d.log", id)
+	return SegmentPathInDir(".", id)
 }
 
 func NewSegment(id uint64) (*WAL, error) {
-	path := SegmentPath(id)
+	return NewSegmentInDir(".", id)
+}
+
+func SegmentPathInDir(dir string, id uint64) string {
+	return filepath.Join(dir, fmt.Sprintf("wal-%d.log", id))
+}
+
+func NewSegmentInDir(dir string, id uint64) (*WAL, error) {
+	path := SegmentPathInDir(dir, id)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 
 	if err != nil {
@@ -47,7 +55,11 @@ func NewSegment(id uint64) (*WAL, error) {
 }
 
 func RemoveSegment(id uint64) error {
-	err := os.Remove(SegmentPath(id))
+	return RemoveSegmentInDir(".", id)
+}
+
+func RemoveSegmentInDir(dir string, id uint64) error {
+	err := os.Remove(SegmentPathInDir(dir, id))
 	// file already deleted
 	if os.IsNotExist(err) {
 		return nil
@@ -56,8 +68,12 @@ func RemoveSegment(id uint64) error {
 }
 
 func ListSegments() ([]Segment, error) {
+	return ListSegmentsInDir(".")
+}
+
+func ListSegmentsInDir(dir string) ([]Segment, error) {
 	// use glob to find all matching wal segments
-	matches, err := filepath.Glob("wal-*.log")
+	matches, err := filepath.Glob(filepath.Join(dir, "wal-*.log"))
 	if err != nil {
 		return nil, err
 	}

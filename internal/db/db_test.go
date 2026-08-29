@@ -128,6 +128,56 @@ func TestFlushDeletesWALAndRestartReadsFromSSTable(t *testing.T) {
 	}
 }
 
+func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
+	useTempWorkingDirectory(t)
+	dataDir := filepath.Join(t.TempDir(), "hyphadb")
+
+	database, err := Open(Options{
+		DataDir:             dataDir,
+		MaxMemtableSize:     2,
+		CompactionThreshold: 10,
+		BlockCacheCapacity:  1024,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if err := database.Put("apple", []byte("red")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := database.Put("banana", []byte("yellow")); err != nil {
+		t.Fatalf("Put banana: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dataDir, "MANIFEST")); err != nil {
+		t.Fatalf("configured MANIFEST: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "data-0.sst")); err != nil {
+		t.Fatalf("configured SSTable: %v", err)
+	}
+
+	reopened, err := Open(Options{
+		DataDir:             dataDir,
+		MaxMemtableSize:     2,
+		CompactionThreshold: 10,
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.Get("apple")
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if string(got) != "red" {
+		t.Fatalf("apple = %q, want red", got)
+	}
+}
+
 func TestConcurrentReadersOfActiveMemtable(t *testing.T) {
 	useTempWorkingDirectory(t)
 

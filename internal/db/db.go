@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
@@ -17,6 +18,7 @@ import (
 )
 
 type DB struct {
+	dataDir             string
 	memtable            *memtable.MemTable
 	immutableMemtables  []*memtable.ImmutableMemTable
 	maxMemtableSize     int
@@ -43,8 +45,38 @@ var ErrClosed = errors.New("database is closed")
 
 const defaultBlockCacheCapacity = 64 * 1024 * 1024
 
+type Options struct {
+	DataDir             string
+	MaxMemtableSize     int
+	CompactionThreshold int
+	BlockCacheCapacity  int
+}
+
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
-	manifestPath := "MANIFEST"
+	return Open(Options{
+		MaxMemtableSize:     maxMemtableSize,
+		CompactionThreshold: compactionThreshold,
+	})
+}
+
+func Open(opts Options) (*DB, error) {
+	if opts.DataDir == "" {
+		opts.DataDir = "."
+	}
+	if opts.MaxMemtableSize <= 0 {
+		return nil, fmt.Errorf("max memtable size must be positive")
+	}
+	if opts.CompactionThreshold <= 0 {
+		return nil, fmt.Errorf("compaction threshold must be positive")
+	}
+	if opts.BlockCacheCapacity <= 0 {
+		opts.BlockCacheCapacity = defaultBlockCacheCapacity
+	}
+	if err := os.MkdirAll(opts.DataDir, 0700); err != nil {
+		return nil, err
+	}
+
+	manifestPath := filepath.Join(opts.DataDir, "MANIFEST")
 	mf, err := manifest.Read(manifestPath)
 	if err != nil {
 		return nil, err
@@ -52,7 +84,7 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 
 	mt := memtable.New()
 
-	segments, err := wal.ListSegments()
+	segments, err := wal.ListSegmentsInDir(opts.DataDir)
 	if err != nil {
 		return nil, err
 	}
@@ -67,23 +99,24 @@ func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	}
 
 	// open WAL for appending
-	w, err := wal.NewSegment(mf.NextWALSegmentID)
+	w, err := wal.NewSegmentInDir(opts.DataDir, mf.NextWALSegmentID)
 	if err != nil {
 		return nil, err
 	}
 
-	cache := blockcache.NewLRU(defaultBlockCacheCapacity)
+	cache := blockcache.NewLRU(opts.BlockCacheCapacity)
 
 	database := &DB{
+		dataDir:             opts.DataDir,
 		memtable:            mt,
-		maxMemtableSize:     maxMemtableSize,
+		maxMemtableSize:     opts.MaxMemtableSize,
 		memTableSize:        mt.Len(),
 		sstables:            make([]*sstable.SSTable, 0, len(mf.SSTables)),
 		blockCache:          cache,
 		wal:                 w,
 		manifest:            mf,
 		manifestPath:        manifestPath,
-		compactionThreshold: compactionThreshold,
+		compactionThreshold: opts.CompactionThreshold,
 		flushSignal:         make(chan struct{}, 1),
 		compactionSignal:    make(chan struct{}, 1),
 		compactionDone:      make(chan struct{}, 1),
@@ -180,7 +213,7 @@ func (db *DB) compactLocked(threshold int) error {
 	}
 
 	id := db.manifest.NextSSTableID
-	compactedSSTablePath := fmt.Sprintf("compact-%d.sst", id)
+	compactedSSTablePath := filepath.Join(db.dataDir, fmt.Sprintf("compact-%d.sst", id))
 	oldestReader, hasReader := db.oldestReaderLocked()
 	var retention *uint64
 	if hasReader {
@@ -447,7 +480,7 @@ func (db *DB) rotateMemtable() error {
 
 	db.manifest.NextWALSegmentID++
 
-	newWAL, err := wal.NewSegment(db.manifest.NextWALSegmentID)
+	newWAL, err := wal.NewSegmentInDir(db.dataDir, db.manifest.NextWALSegmentID)
 	if err != nil {
 		return err
 	}
@@ -543,7 +576,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 
 	db.mu.Lock()
 	id := db.manifest.NextSSTableID
-	sstablePath := fmt.Sprintf("data-%d.sst", id)
+	sstablePath := filepath.Join(db.dataDir, fmt.Sprintf("data-%d.sst", id))
 	oldNextSSTableID := db.manifest.NextSSTableID
 	db.manifest.NextSSTableID++
 	db.mu.Unlock()
@@ -598,7 +631,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 
 	db.mu.Unlock()
 
-	if err := wal.RemoveSegment(imm.WalID); err != nil {
+	if err := wal.RemoveSegmentInDir(db.dataDir, imm.WalID); err != nil {
 		return err
 	}
 
