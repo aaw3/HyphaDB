@@ -46,16 +46,32 @@ var ErrClosed = errors.New("database is closed")
 const defaultBlockCacheCapacity = 64 * 1024 * 1024
 
 type Options struct {
-	DataDir             string
-	MaxMemtableSize     int
-	CompactionThreshold int
-	BlockCacheCapacity  int
+	DataDir    string
+	Memtable   MemtableOptions
+	Compaction CompactionOptions
+	BlockCache BlockCacheOptions
+}
+
+type MemtableOptions struct {
+	MaxEntries int
+}
+
+type CompactionOptions struct {
+	TableCountThreshold int
+}
+
+type BlockCacheOptions struct {
+	CapacityBytes int
 }
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
 	return Open(Options{
-		MaxMemtableSize:     maxMemtableSize,
-		CompactionThreshold: compactionThreshold,
+		Memtable: MemtableOptions{
+			MaxEntries: maxMemtableSize,
+		},
+		Compaction: CompactionOptions{
+			TableCountThreshold: compactionThreshold,
+		},
 	})
 }
 
@@ -63,14 +79,14 @@ func Open(opts Options) (*DB, error) {
 	if opts.DataDir == "" {
 		opts.DataDir = "."
 	}
-	if opts.MaxMemtableSize <= 0 {
+	if opts.Memtable.MaxEntries <= 0 {
 		return nil, fmt.Errorf("max memtable size must be positive")
 	}
-	if opts.CompactionThreshold <= 0 {
+	if opts.Compaction.TableCountThreshold <= 0 {
 		return nil, fmt.Errorf("compaction threshold must be positive")
 	}
-	if opts.BlockCacheCapacity <= 0 {
-		opts.BlockCacheCapacity = defaultBlockCacheCapacity
+	if opts.BlockCache.CapacityBytes <= 0 {
+		opts.BlockCache.CapacityBytes = defaultBlockCacheCapacity
 	}
 	if err := os.MkdirAll(opts.DataDir, 0700); err != nil {
 		return nil, err
@@ -104,19 +120,19 @@ func Open(opts Options) (*DB, error) {
 		return nil, err
 	}
 
-	cache := blockcache.NewLRU(opts.BlockCacheCapacity)
+	cache := blockcache.NewLRU(opts.BlockCache.CapacityBytes)
 
 	database := &DB{
 		dataDir:             opts.DataDir,
 		memtable:            mt,
-		maxMemtableSize:     opts.MaxMemtableSize,
+		maxMemtableSize:     opts.Memtable.MaxEntries,
 		memTableSize:        mt.Len(),
 		sstables:            make([]*sstable.SSTable, 0, len(mf.SSTables)),
 		blockCache:          cache,
 		wal:                 w,
 		manifest:            mf,
 		manifestPath:        manifestPath,
-		compactionThreshold: opts.CompactionThreshold,
+		compactionThreshold: opts.Compaction.TableCountThreshold,
 		flushSignal:         make(chan struct{}, 1),
 		compactionSignal:    make(chan struct{}, 1),
 		compactionDone:      make(chan struct{}, 1),

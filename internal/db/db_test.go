@@ -133,10 +133,16 @@ func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "hyphadb")
 
 	database, err := Open(Options{
-		DataDir:             dataDir,
-		MaxMemtableSize:     2,
-		CompactionThreshold: 10,
-		BlockCacheCapacity:  1024,
+		DataDir: dataDir,
+		Memtable: MemtableOptions{
+			MaxEntries: 2,
+		},
+		Compaction: CompactionOptions{
+			TableCountThreshold: 10,
+		},
+		BlockCache: BlockCacheOptions{
+			CapacityBytes: 1024,
+		},
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -160,9 +166,13 @@ func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
 	}
 
 	reopened, err := Open(Options{
-		DataDir:             dataDir,
-		MaxMemtableSize:     2,
-		CompactionThreshold: 10,
+		DataDir: dataDir,
+		Memtable: MemtableOptions{
+			MaxEntries: 2,
+		},
+		Compaction: CompactionOptions{
+			TableCountThreshold: 10,
+		},
 	})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
