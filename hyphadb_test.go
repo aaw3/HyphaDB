@@ -126,3 +126,43 @@ func TestPublicAPISnapshotAndIterator(t *testing.T) {
 		t.Fatalf("missing Get error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestPublicAPIBatchCommitAndCancel(t *testing.T) {
+	database, err := Open(Options{
+		DataDir:    t.TempDir(),
+		Memtable:   MemtableOptions{MaxEntries: 100},
+		Compaction: CompactionOptions{TableCountThreshold: 100},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	batch := database.NewBatch()
+	if err := batch.Put("document/1", []byte("body")); err != nil {
+		t.Fatalf("batch Put: %v", err)
+	}
+	if err := batch.Put("index/body/1", []byte("document/1")); err != nil {
+		t.Fatalf("batch index Put: %v", err)
+	}
+	if err := batch.Commit(WriteOptions{Sync: true}); err != nil {
+		t.Fatalf("batch Commit: %v", err)
+	}
+
+	for _, key := range []string{"document/1", "index/body/1"} {
+		if _, err := database.Get(key); err != nil {
+			t.Fatalf("Get %q after batch: %v", key, err)
+		}
+	}
+
+	canceled := database.NewBatch()
+	if err := canceled.Put("not-visible", []byte("value")); err != nil {
+		t.Fatalf("canceled Put: %v", err)
+	}
+	if err := canceled.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := database.Get("not-visible"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("canceled value error = %v, want ErrNotFound", err)
+	}
+}

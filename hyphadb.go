@@ -10,6 +10,7 @@ var (
 	ErrClosed         = internaldb.ErrClosed
 	ErrNotFound       = sstable.ErrNotFound
 	ErrSnapshotClosed = internaldb.ErrSnapshotClosed
+	ErrBatchClosed    = internaldb.ErrBatchClosed
 )
 
 type Options struct {
@@ -81,6 +82,10 @@ func (db *DB) Delete(key string) error {
 	return db.inner.Delete(key)
 }
 
+func (db *DB) NewBatch() *Batch {
+	return &Batch{inner: db.inner.NewBatch()}
+}
+
 func (db *DB) NewSnapshot() (*Snapshot, error) {
 	snapshot, err := db.inner.NewSnapshot()
 	if err != nil {
@@ -114,6 +119,30 @@ func (db *DB) Compact() error {
 
 func (db *DB) Close() error {
 	return db.inner.Close()
+}
+
+type WriteOptions struct {
+	Sync bool
+}
+
+type Batch struct {
+	inner *internaldb.Batch
+}
+
+func (batch *Batch) Put(key string, value []byte) error {
+	return batch.inner.Put(key, cloneBytes(value))
+}
+
+func (batch *Batch) Delete(key string) error {
+	return batch.inner.Delete(key)
+}
+
+func (batch *Batch) Commit(opts WriteOptions) error {
+	return batch.inner.Commit(internaldb.WriteOptions{Sync: opts.Sync})
+}
+
+func (batch *Batch) Cancel() error {
+	return batch.inner.Cancel()
 }
 
 type Snapshot struct {

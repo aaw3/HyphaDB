@@ -130,6 +130,32 @@ func (w *WAL) WriteRecord(record record.Record) error {
 	return w.encoder.Encode(record)
 }
 
+func (w *WAL) WriteBatch(batchID uint64, records []record.Record, sync bool) error {
+	if err := w.WriteRecord(record.Record{
+		BatchID:   batchID,
+		BatchKind: record.BatchBegin,
+	}); err != nil {
+		return err
+	}
+	for _, rec := range records {
+		rec.BatchID = batchID
+		rec.BatchKind = record.BatchOperation
+		if err := w.WriteRecord(rec); err != nil {
+			return err
+		}
+	}
+	if err := w.WriteRecord(record.Record{
+		BatchID:   batchID,
+		BatchKind: record.BatchCommit,
+	}); err != nil {
+		return err
+	}
+	if sync {
+		return w.file.Sync()
+	}
+	return nil
+}
+
 func ReplayInto(path string, mt *memtable.MemTable) error {
 	file, err := os.Open(path)
 
@@ -142,16 +168,35 @@ func ReplayInto(path string, mt *memtable.MemTable) error {
 	defer file.Close()
 
 	decoder := gob.NewDecoder(file)
+	pending := make(map[uint64][]record.Record)
 	for {
-		var record record.Record
-		if err := decoder.Decode(&record); err != nil {
+		var rec record.Record
+		if err := decoder.Decode(&rec); err != nil {
 			if err == io.EOF {
 				// EOF
 				break
 			}
 			return err
 		}
-		mt.Put(record)
+		switch rec.BatchKind {
+		case record.BatchNone:
+			mt.Put(rec)
+		case record.BatchBegin:
+			pending[rec.BatchID] = nil
+		case record.BatchOperation:
+			if _, ok := pending[rec.BatchID]; ok {
+				pending[rec.BatchID] = append(pending[rec.BatchID], rec)
+			}
+		case record.BatchCommit:
+			if records, ok := pending[rec.BatchID]; ok {
+				for _, operation := range records {
+					operation.BatchID = 0
+					operation.BatchKind = record.BatchNone
+					mt.Put(operation)
+				}
+				delete(pending, rec.BatchID)
+			}
+		}
 	}
 	return nil
 }

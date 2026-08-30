@@ -123,6 +123,47 @@ func TestWALReplayPreservesTombstone(t *testing.T) {
 	}
 }
 
+func TestWALBatchReplayRequiresCommitMarker(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	w, err := NewSegment(4)
+	if err != nil {
+		t.Fatalf("NewSegment: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{BatchID: 7, BatchKind: record.BatchBegin}); err != nil {
+		t.Fatalf("write batch begin: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{
+		Key:     "incomplete",
+		Seq:     1,
+		Entry:   record.Entry{Value: []byte("value")},
+		BatchID: 7, BatchKind: record.BatchOperation,
+	}); err != nil {
+		t.Fatalf("write batch operation: %v", err)
+	}
+	if err := w.WriteBatch(8, []record.Record{{
+		Key:   "complete",
+		Seq:   2,
+		Entry: record.Entry{Value: []byte("value")},
+	}}, true); err != nil {
+		t.Fatalf("write complete batch: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mt := memtable.New()
+	if err := ReplayInto(SegmentPath(4), mt); err != nil {
+		t.Fatalf("ReplayInto: %v", err)
+	}
+	if _, ok := mt.Get("incomplete"); ok {
+		t.Fatal("incomplete batch was replayed")
+	}
+	if _, ok := mt.Get("complete"); !ok {
+		t.Fatal("complete batch was not replayed")
+	}
+}
+
 func TestListSegmentsReturnsNumericOrder(t *testing.T) {
 	useTempWorkingDirectory(t)
 
