@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package hyphadb.v1;
+
+option go_package = "github.com/aaw3/hyphadb/gen/hyphadb/v1;hyphadbv1";
+
+// StorageService provides key-value storage operations.
+service StorageService {
+  // Get returns the latest visible value for the given key.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Put stores or updates a key's value.
+  rpc Put(PutRequest) returns (PutResponse);
+  // Delete removes a key and its value.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  // WriteBatch applies a batch of mutations atomically.
+  rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  // Scan streams entries in key order.
+  rpc Scan(ScanRequest) returns (stream ScanEntry);
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bytes value = 1;
+}
+
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+  bool sync = 3;
+}
+
+message PutResponse {}
+
+message DeleteRequest {
+  string key = 1;
+  bool sync = 2;
+}
+
+message DeleteResponse {}
+
+message WriteBatchRequest {
+  repeated Mutation mutations = 1;
+  bool sync = 2;
+}
+
+message WriteBatchResponse {}
+
+message Mutation {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    PUT = 1;
+    DELETE = 2;
+  }
+
+  Type type = 1;
+  string key = 2;
+  bytes value = 3;
+}
+
+message ScanRequest {
+  string start = 1;
+  string end = 2;
+  int32 limit = 3;
+}
+
+message ScanEntry {
+  string key = 1;
+  bytes value = 2;
+}
