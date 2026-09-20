@@ -2,7 +2,9 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/aaw3/hyphadb/internal/manifest"
@@ -622,6 +624,75 @@ func TestIteratorReturnsErrClosed(t *testing.T) {
 	_, err = database.NewIterator(IteratorOptions{})
 	if !errors.Is(err, ErrClosed) {
 		t.Fatalf("NewIterator error = %v, want %v", err, ErrClosed)
+	}
+}
+
+func TestIteratorActiveMemtableViewIsStableDuringConcurrentWrites(t *testing.T) {
+	database, err := Open(Options{
+		DataDir: t.TempDir(),
+		Memtable: MemtableOptions{
+			MaxEntries: 10_000,
+		},
+		Compaction: CompactionOptions{
+			TableCountThreshold: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	const initialRecords = 2_000
+	for i := 0; i < initialRecords; i++ {
+		key := fmt.Sprintf("key-%04d", i)
+		if err := database.Put(key, []byte("original")); err != nil {
+			t.Fatalf("Put %q: %v", key, err)
+		}
+	}
+
+	it, err := database.NewIterator(IteratorOptions{})
+	if err != nil {
+		t.Fatalf("NewIterator: %v", err)
+	}
+	defer it.Close()
+
+	start := make(chan struct{})
+	writeErr := make(chan error, 1)
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		<-start
+		for i := 0; i < initialRecords; i++ {
+			key := fmt.Sprintf("key-%04d", i)
+			if err := database.Put(key, []byte("updated")); err != nil {
+				writeErr <- err
+				return
+			}
+		}
+	}()
+
+	close(start)
+	count := 0
+	for it.Next() {
+		if got := string(it.Record().Value); got != "original" {
+			t.Fatalf("iterator value = %q, want original", got)
+		}
+		count++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+
+	writer.Wait()
+	select {
+	case err := <-writeErr:
+		t.Fatalf("concurrent Put: %v", err)
+	default:
+	}
+
+	if count != initialRecords {
+		t.Fatalf("iterator record count = %d, want %d", count, initialRecords)
 	}
 }
 

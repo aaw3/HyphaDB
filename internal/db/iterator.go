@@ -86,7 +86,10 @@ func (db *DB) newIteratorLocked(opts IteratorOptions, maxSeq uint64) (*Iterator,
 		maxSeq: maxSeq,
 	}
 
-	it.sources = append(it.sources, db.memtable.Iterator())
+	// The active memtable can continue receiving writes after this method
+	// releases db.mu. Capture an immutable view so iteration is race-free and
+	// remains fixed at creation time.
+	it.sources = append(it.sources, db.memtable.SnapshotIterator())
 
 	for i := len(db.immutableMemtables) - 1; i >= 0; i-- {
 		it.sources = append(it.sources, db.immutableMemtables[i].MemTable.Iterator())
