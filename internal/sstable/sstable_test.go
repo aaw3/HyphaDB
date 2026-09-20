@@ -111,6 +111,44 @@ func TestGetRecordAtReturnsVisibleVersion(t *testing.T) {
 	}
 }
 
+func TestGetRecordAtFindsVersionsSpanningBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "versions-across-blocks.sst")
+	records := []record.Record{
+		{Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")}},
+		{Key: "apple", Seq: 7, Entry: record.Entry{Value: []byte("yellow")}},
+		{Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")}},
+		{Key: "banana", Seq: 1, Entry: record.Entry{Value: []byte("yellow")}},
+	}
+
+	sst, err := CreateFromRecords(records, path, 32)
+	if err != nil {
+		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+	if len(sst.index) < 4 {
+		t.Fatalf("block count = %d, want at least 4", len(sst.index))
+	}
+
+	tests := []struct {
+		name   string
+		maxSeq uint64
+		want   uint64
+	}{
+		{name: "latest", maxSeq: ^uint64(0), want: 10},
+		{name: "historical", maxSeq: 7, want: 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := sst.GetRecordAt("apple", tt.maxSeq)
+			if err != nil {
+				t.Fatalf("GetRecordAt: %v", err)
+			}
+			if !ok || got.Seq != tt.want {
+				t.Fatalf("record = %+v, %v; want sequence %d", got, ok, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreateFromRecordsWithTinyBlockSize(t *testing.T) {
 	path := t.TempDir() + "/test_sstable_tiny_block.sst"
 	records := []record.Record{

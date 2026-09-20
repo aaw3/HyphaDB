@@ -67,12 +67,7 @@ func (it *Iterator) Seek(key string) error {
 		return nil
 	}
 
-	blockIndex := sort.Search(len(it.index), func(i int) bool {
-		return it.index[i].FirstKey > key
-	}) - 1
-	if blockIndex < 0 {
-		blockIndex = 0
-	}
+	blockIndex := firstPossibleBlock(it.index, key)
 
 	if err := it.loadBlock(blockIndex); err != nil {
 		return err

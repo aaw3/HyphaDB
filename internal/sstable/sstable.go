@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
@@ -135,11 +134,9 @@ func (s *SSTable) GetRecordAt(key string, maxSeq uint64) (record.Record, bool, e
 	}
 	s.metaMu.RUnlock()
 
-	// Find the first block that may contain key. Continue through subsequent
-	// blocks because multiple versions of one key may cross a block boundary.
-	i := sort.Search(len(s.index), func(i int) bool {
-		return s.index[i].FirstKey > key
-	}) - 1
+	// Start at the earliest block that may contain key. Continue through
+	// subsequent blocks because multiple versions may cross block boundaries.
+	i := firstPossibleBlock(s.index, key)
 	if i < 0 {
 		return record.Record{}, false, nil
 	}

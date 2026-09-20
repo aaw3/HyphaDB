@@ -5,12 +5,33 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sort"
 )
 
 type IndexEntry struct {
 	FirstKey string
 	Offset   uint64
 	Length   uint32
+}
+
+// firstPossibleBlock returns the earliest block that may contain key. The
+// preceding block must be included because a key can begin near the end of one
+// block and continue into later blocks whose FirstKey is the same key.
+func firstPossibleBlock(index []IndexEntry, key string) int {
+	if len(index) == 0 {
+		return -1
+	}
+
+	i := sort.Search(len(index), func(i int) bool {
+		return index[i].FirstKey >= key
+	})
+	if i == len(index) {
+		return len(index) - 1
+	}
+	if i > 0 {
+		return i - 1
+	}
+	return 0
 }
 
 func writeIndex(w io.Writer, index []IndexEntry) error {
