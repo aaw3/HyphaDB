@@ -235,10 +235,14 @@ func (db *DB) compactLocked(threshold int) error {
 	if hasReader {
 		retention = &oldestReader
 	}
-	compactedSSTable, err := compaction.MergeSSTablesWithRetention(
+	compactedSSTable, err := compaction.MergeSSTablesWithOptions(
 		inputTables,
 		compactedSSTablePath,
-		retention,
+		compaction.MergeOptions{
+			OldestReader: retention,
+			DropTombstones: plan.TargetLevel ==
+				compaction.HighestSupportedLevel,
+		},
 	)
 	if err != nil {
 		return err

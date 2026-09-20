@@ -6,7 +6,10 @@ import (
 	"github.com/aaw3/hyphadb/internal/manifest"
 )
 
-const L0 uint32 = 0
+const (
+	L0                    uint32 = 0
+	HighestSupportedLevel        = L0 + 2
+)
 
 const baseLevelTargetBytes uint64 = 64 * 1024 * 1024
 

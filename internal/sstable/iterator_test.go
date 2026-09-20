@@ -172,6 +172,41 @@ func TestIteratorSeekStartsAtLowerBound(t *testing.T) {
 	}
 }
 
+func TestIteratorSeekFindsFirstVersionSpanningBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seek-versions-across-blocks.sst")
+	records := []record.Record{
+		{Key: "aardvark", Seq: 1},
+		{Key: "apple", Seq: 10},
+		{Key: "apple", Seq: 7},
+		{Key: "apple", Seq: 5},
+		{Key: "banana", Seq: 2},
+	}
+
+	sst, err := CreateFromRecords(records, path, 32)
+	if err != nil {
+		t.Fatalf("CreateFromRecords failed: %v", err)
+	}
+	if len(sst.index) < 5 {
+		t.Fatalf("block count = %d, want at least 5", len(sst.index))
+	}
+
+	it, err := sst.Iterator()
+	if err != nil {
+		t.Fatalf("Iterator failed: %v", err)
+	}
+	defer it.Close()
+
+	if err := it.Seek("apple"); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if !it.Next() {
+		t.Fatalf("Next returned false: %v", it.Err())
+	}
+	if got := it.Record(); got.Key != "apple" || got.Seq != 10 {
+		t.Fatalf("record after Seek = %+v, want apple sequence 10", got)
+	}
+}
+
 func TestIteratorSeekPastLastKeyReturnsEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seek-past-last.sst")
 	records := []record.Record{

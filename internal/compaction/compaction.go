@@ -8,16 +8,35 @@ import (
 )
 
 func MergeSSTables(sstables []*sstable.SSTable, newPath string) (*sstable.SSTable, error) {
-	return MergeSSTablesWithRetention(sstables, newPath, nil)
+	return MergeSSTablesWithOptions(sstables, newPath, MergeOptions{})
+}
+
+// MergeOptions controls which obsolete versions may be discarded.
+type MergeOptions struct {
+	OldestReader   *uint64
+	DropTombstones bool
 }
 
 // MergeSSTablesWithRetention merges tables while preserving the versions
-// visible to the oldest active reader. A nil oldestReader keeps only the
-// newest non-tombstone version.
+// visible to the oldest active reader. Tombstones are preserved because this
+// helper does not know whether older values remain outside the merge inputs.
 func MergeSSTablesWithRetention(
 	sstables []*sstable.SSTable,
 	newPath string,
 	oldestReader *uint64,
+) (*sstable.SSTable, error) {
+	return MergeSSTablesWithOptions(sstables, newPath, MergeOptions{
+		OldestReader: oldestReader,
+	})
+}
+
+// MergeSSTablesWithOptions merges tables while retaining every version needed
+// by active readers. A tombstone may only be dropped when all older versions
+// of its key are known to be included in the merge.
+func MergeSSTablesWithOptions(
+	sstables []*sstable.SSTable,
+	newPath string,
+	options MergeOptions,
 ) (*sstable.SSTable, error) {
 	iters := make([]*sstable.Iterator, len(sstables))
 
@@ -62,11 +81,15 @@ func MergeSSTablesWithRetention(
 		}
 
 		keep := false
-		if oldestReader == nil {
-			// Without active readers, only the newest version is needed.
-			keep = !retainedVisible && !item.Record.Deleted
-			retainedVisible = true
-		} else if item.Record.Seq > *oldestReader {
+		if options.OldestReader == nil {
+			// Without active readers, only the newest version is needed. Keep a
+			// tombstone unless the caller has established that no older value
+			// can remain outside this merge.
+			if !retainedVisible {
+				keep = !item.Record.Deleted || !options.DropTombstones
+				retainedVisible = true
+			}
+		} else if item.Record.Seq > *options.OldestReader {
 			// Newer versions may be visible to newer readers or future reads.
 			keep = true
 		} else if !retainedVisible {
@@ -82,7 +105,7 @@ func MergeSSTablesWithRetention(
 
 		// Once a version at or below the retention boundary has been kept,
 		// all remaining versions for this key are older and can be skipped.
-		if oldestReader != nil && item.Record.Seq <= *oldestReader {
+		if options.OldestReader != nil && item.Record.Seq <= *options.OldestReader {
 			retainedVisible = true
 		}
 

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -678,6 +679,77 @@ func TestCompactionPreservesDisjointL1Table(t *testing.T) {
 	}
 	if _, err := os.Stat("data-1.sst"); err != nil {
 		t.Fatalf("disjoint L1 table was removed: %v", err)
+	}
+}
+
+func TestL0CompactionPreservesTombstoneHidingL2Value(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	_, err = sstable.CreateFromRecords([]record.Record{{
+		Key: "apple", Seq: 5, Entry: record.Entry{Value: []byte("red")},
+	}}, "data-0.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create L2 SSTable: %v", err)
+	}
+	_, err = sstable.CreateFromRecords([]record.Record{{
+		Key: "apple", Seq: 10, Entry: record.Entry{Deleted: true},
+	}}, "data-1.sst", sstable.DefaultBlockSize)
+	if err != nil {
+		t.Fatalf("create L0 SSTable: %v", err)
+	}
+
+	l2 := manifest.SSTableMetadata{
+		ID: 0, Path: "data-0.sst", Level: compaction.HighestSupportedLevel,
+		SmallestKey: "apple", LargestKey: "apple",
+	}
+	l0 := manifest.SSTableMetadata{
+		ID: 1, Path: "data-1.sst", Level: compaction.L0,
+		SmallestKey: "apple", LargestKey: "apple",
+	}
+	database.sstables = []*sstable.SSTable{
+		database.newSSTable(l2),
+		database.newSSTable(l0),
+	}
+	database.manifest.NextSSTableID = 2
+	database.manifest.SSTables = []manifest.SSTableMetadata{l2, l0}
+
+	if _, err := database.Get("apple"); !errors.Is(err, sstable.ErrNotFound) {
+		t.Fatalf("Get before compaction error = %v, want ErrNotFound", err)
+	}
+
+	if err := database.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if _, err := database.Get("apple"); !errors.Is(err, sstable.ErrNotFound) {
+		t.Fatalf("Get after compaction error = %v, want ErrNotFound", err)
+	}
+
+	var compacted *sstable.SSTable
+	for _, table := range database.sstables {
+		if table.Level == compaction.L0+1 {
+			compacted = table
+			break
+		}
+	}
+	if compacted == nil {
+		t.Fatal("compacted L1 SSTable not found")
+	}
+	rec, ok, err := compacted.GetRecordAt("apple", ^uint64(0))
+	if err != nil {
+		t.Fatalf("GetRecordAt compacted L1: %v", err)
+	}
+	if !ok || rec.Seq != 10 || !rec.Deleted {
+		t.Fatalf("compacted record = %+v, %v; want sequence 10 tombstone", rec, ok)
+	}
+	if _, err := os.Stat("data-0.sst"); err != nil {
+		t.Fatalf("older L2 SSTable should remain: %v", err)
 	}
 }
 
