@@ -26,6 +26,12 @@ type Segment struct {
 	Path string
 }
 
+// ReplayStats describes identifiers consumed by records in a WAL segment,
+// including records from incomplete batches that are not applied.
+type ReplayStats struct {
+	MaxSequence uint64
+}
+
 func SegmentPath(id uint64) string {
 	return SegmentPathInDir(".", id)
 }
@@ -157,16 +163,22 @@ func (w *WAL) WriteBatch(batchID uint64, records []record.Record, sync bool) err
 }
 
 func ReplayInto(path string, mt *memtable.MemTable) error {
+	_, err := ReplayIntoWithStats(path, mt)
+	return err
+}
+
+func ReplayIntoWithStats(path string, mt *memtable.MemTable) (ReplayStats, error) {
 	file, err := os.Open(path)
 
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return ReplayStats{}, nil
 		}
-		return err
+		return ReplayStats{}, err
 	}
 	defer file.Close()
 
+	var stats ReplayStats
 	decoder := gob.NewDecoder(file)
 	pending := make(map[uint64][]record.Record)
 	for {
@@ -176,7 +188,13 @@ func ReplayInto(path string, mt *memtable.MemTable) error {
 				// EOF
 				break
 			}
-			return err
+			return ReplayStats{}, err
+		}
+		if rec.Seq > stats.MaxSequence {
+			stats.MaxSequence = rec.Seq
+		}
+		if rec.BatchID > stats.MaxSequence {
+			stats.MaxSequence = rec.BatchID
 		}
 		switch rec.BatchKind {
 		case record.BatchNone:
@@ -198,7 +216,7 @@ func ReplayInto(path string, mt *memtable.MemTable) error {
 			}
 		}
 	}
-	return nil
+	return stats, nil
 }
 
 func (w *WAL) Close() error {

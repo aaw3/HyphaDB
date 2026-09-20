@@ -105,12 +105,27 @@ func Open(opts Options) (*DB, error) {
 		return nil, err
 	}
 
+	var recoveredWALMaxSeq uint64
 	// Replay all WAL segments into the memtable
 	// Can cause memory issues if many WAL segments exist
 	// Later recovery should build multiple memtables from WAL segments if they exceed a certain size
 	for _, segment := range segments {
-		if err := wal.ReplayInto(segment.Path, mt); err != nil {
+		stats, err := wal.ReplayIntoWithStats(segment.Path, mt)
+		if err != nil {
 			return nil, err
+		}
+		if stats.MaxSequence > recoveredWALMaxSeq {
+			recoveredWALMaxSeq = stats.MaxSequence
+		}
+	}
+
+	// The manifest can lag behind a segment rotation if the process stops
+	// before the next manifest write. Never reopen or subsequently allocate a
+	// segment below one that already exists on disk.
+	if len(segments) > 0 {
+		lastSegmentID := segments[len(segments)-1].ID
+		if lastSegmentID > mf.NextWALSegmentID {
+			mf.NextWALSegmentID = lastSegmentID
 		}
 	}
 
@@ -158,7 +173,7 @@ func Open(opts Options) (*DB, error) {
 
 	memMaxSeq := maxSeqFromMemTable(mt)
 
-	maxSeq := max(sstableMaxSeq, memMaxSeq)
+	maxSeq := max(sstableMaxSeq, memMaxSeq, recoveredWALMaxSeq)
 	nextSeq := maxSeq + 1
 
 	database.nextSeq = nextSeq

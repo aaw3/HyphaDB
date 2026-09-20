@@ -15,6 +15,7 @@ import (
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
 	"github.com/aaw3/hyphadb/internal/sstable"
+	"github.com/aaw3/hyphadb/internal/wal"
 )
 
 func useTempWorkingDirectory(t *testing.T) {
@@ -186,6 +187,66 @@ func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
 	}
 	if string(got) != "red" {
 		t.Fatalf("apple = %q, want red", got)
+	}
+}
+
+func TestOpenAdvancesSequenceAndWALIDFromRecoveredSegments(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	w, err := wal.NewSegment(7)
+	if err != nil {
+		t.Fatalf("NewSegment: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{
+		BatchID:   50,
+		BatchKind: record.BatchBegin,
+	}); err != nil {
+		t.Fatalf("write batch begin: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{
+		Key:       "incomplete",
+		Seq:       50,
+		Entry:     record.Entry{Value: []byte("ignored")},
+		BatchID:   50,
+		BatchKind: record.BatchOperation,
+	}); err != nil {
+		t.Fatalf("write batch operation: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close recovered WAL: %v", err)
+	}
+
+	database, err := New(100, 10)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	if database.wal.ID != 7 {
+		t.Fatalf("active WAL ID = %d, want 7", database.wal.ID)
+	}
+	if database.manifest.NextWALSegmentID != 7 {
+		t.Fatalf(
+			"manifest WAL ID = %d, want 7",
+			database.manifest.NextWALSegmentID,
+		)
+	}
+	if database.nextSeq != 51 {
+		t.Fatalf("next sequence = %d, want 51", database.nextSeq)
+	}
+	if _, ok := database.memtable.Get("incomplete"); ok {
+		t.Fatal("incomplete batch was recovered")
+	}
+
+	if err := database.Put("complete", []byte("value")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rec, ok := database.memtable.Get("complete")
+	if !ok {
+		t.Fatal("complete record not found in memtable")
+	}
+	if rec.Seq != 51 {
+		t.Fatalf("complete sequence = %d, want 51", rec.Seq)
 	}
 }
 

@@ -164,6 +164,44 @@ func TestWALBatchReplayRequiresCommitMarker(t *testing.T) {
 	}
 }
 
+func TestReplayStatsIncludeUnappliedAndEmptyBatchIDs(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	w, err := NewSegment(5)
+	if err != nil {
+		t.Fatalf("NewSegment: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{
+		BatchID: 40, BatchKind: record.BatchBegin,
+	}); err != nil {
+		t.Fatalf("write incomplete batch begin: %v", err)
+	}
+	if err := w.WriteRecord(record.Record{
+		Key: "incomplete", Seq: 41, Entry: record.Entry{Value: []byte("value")},
+		BatchID: 40, BatchKind: record.BatchOperation,
+	}); err != nil {
+		t.Fatalf("write incomplete batch operation: %v", err)
+	}
+	if err := w.WriteBatch(50, nil, true); err != nil {
+		t.Fatalf("write empty batch: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mt := memtable.New()
+	stats, err := ReplayIntoWithStats(SegmentPath(5), mt)
+	if err != nil {
+		t.Fatalf("ReplayIntoWithStats: %v", err)
+	}
+	if stats.MaxSequence != 50 {
+		t.Fatalf("MaxSequence = %d, want 50", stats.MaxSequence)
+	}
+	if _, ok := mt.Get("incomplete"); ok {
+		t.Fatal("incomplete batch was applied")
+	}
+}
+
 func TestListSegmentsReturnsNumericOrder(t *testing.T) {
 	useTempWorkingDirectory(t)
 
