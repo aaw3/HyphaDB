@@ -10,6 +10,7 @@ import (
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/compaction"
+	"github.com/aaw3/hyphadb/internal/filelock"
 	"github.com/aaw3/hyphadb/internal/fsutil"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
@@ -31,6 +32,8 @@ type DB struct {
 	manifestPath        string
 	compactionThreshold int
 	nextSeq             uint64
+	limits              LimitsOptions
+	directoryLock       *filelock.Lock
 
 	mu               sync.RWMutex
 	flushSignal      chan struct{}
@@ -42,15 +45,26 @@ type DB struct {
 	compactionWG     sync.WaitGroup
 }
 
-var ErrClosed = errors.New("database is closed")
+var (
+	ErrClosed         = errors.New("database is closed")
+	ErrDatabaseLocked = filelock.ErrLocked
+	ErrKeyTooLarge    = errors.New("key exceeds configured size limit")
+	ErrValueTooLarge  = errors.New("value exceeds configured size limit")
+	ErrBatchTooLarge  = errors.New("batch exceeds configured size limit")
+)
 
-const defaultBlockCacheCapacity = 64 * 1024 * 1024
+const (
+	defaultBlockCacheCapacity = 64 * 1024 * 1024
+	defaultMaxBatchOperations = 10_000
+	defaultMaxBatchBytes      = 128 * 1024 * 1024
+)
 
 type Options struct {
 	DataDir    string
 	Memtable   MemtableOptions
 	Compaction CompactionOptions
 	BlockCache BlockCacheOptions
+	Limits     LimitsOptions
 }
 
 type MemtableOptions struct {
@@ -63,6 +77,15 @@ type CompactionOptions struct {
 
 type BlockCacheOptions struct {
 	CapacityBytes int
+}
+
+// LimitsOptions bounds memory used by individual writes and batches.
+// Zero values select storage-safe defaults.
+type LimitsOptions struct {
+	MaxKeyBytes        int
+	MaxValueBytes      int
+	MaxBatchOperations int
+	MaxBatchBytes      int
 }
 
 func New(maxMemtableSize int, compactionThreshold int) (*DB, error) {
@@ -89,9 +112,28 @@ func Open(opts Options) (*DB, error) {
 	if opts.BlockCache.CapacityBytes <= 0 {
 		opts.BlockCache.CapacityBytes = defaultBlockCacheCapacity
 	}
+	if err := normalizeLimits(&opts.Limits); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(opts.DataDir, 0700); err != nil {
 		return nil, err
 	}
+
+	directoryLock, err := filelock.Acquire(filepath.Join(opts.DataDir, "LOCK"))
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	var w *wal.WAL
+	defer func() {
+		if opened {
+			return
+		}
+		if w != nil {
+			_ = w.Close()
+		}
+		_ = directoryLock.Close()
+	}()
 
 	manifestPath := filepath.Join(opts.DataDir, "MANIFEST")
 	mf, err := manifest.Read(manifestPath)
@@ -131,7 +173,7 @@ func Open(opts Options) (*DB, error) {
 	}
 
 	// open WAL for appending
-	w, err := wal.NewSegmentInDir(opts.DataDir, mf.NextWALSegmentID)
+	w, err = wal.NewSegmentInDir(opts.DataDir, mf.NextWALSegmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +191,8 @@ func Open(opts Options) (*DB, error) {
 		manifest:            mf,
 		manifestPath:        manifestPath,
 		compactionThreshold: opts.Compaction.TableCountThreshold,
+		limits:              opts.Limits,
+		directoryLock:       directoryLock,
 		flushSignal:         make(chan struct{}, 1),
 		compactionSignal:    make(chan struct{}, 1),
 		compactionDone:      make(chan struct{}, 1),
@@ -184,7 +228,60 @@ func Open(opts Options) (*DB, error) {
 	database.compactionWG.Add(1)
 	go database.compactionLoop()
 
+	opened = true
 	return database, nil
+}
+
+func normalizeLimits(limits *LimitsOptions) error {
+	if limits.MaxKeyBytes == 0 {
+		limits.MaxKeyBytes = record.MaxKeySize
+	}
+	if limits.MaxValueBytes == 0 {
+		limits.MaxValueBytes = record.MaxValueSize
+	}
+	if limits.MaxBatchOperations == 0 {
+		limits.MaxBatchOperations = defaultMaxBatchOperations
+	}
+	if limits.MaxBatchBytes == 0 {
+		limits.MaxBatchBytes = defaultMaxBatchBytes
+	}
+	if limits.MaxKeyBytes < 1 || limits.MaxKeyBytes > record.MaxKeySize {
+		return fmt.Errorf("max key bytes must be between 1 and %d", record.MaxKeySize)
+	}
+	if limits.MaxValueBytes < 1 || limits.MaxValueBytes > record.MaxValueSize {
+		return fmt.Errorf("max value bytes must be between 1 and %d", record.MaxValueSize)
+	}
+	if limits.MaxBatchOperations < 1 {
+		return fmt.Errorf("max batch operations must be positive")
+	}
+	if limits.MaxBatchBytes < 1 {
+		return fmt.Errorf("max batch bytes must be positive")
+	}
+	return nil
+}
+
+func (db *DB) validateKey(key string) error {
+	if len(key) > db.limits.MaxKeyBytes {
+		return fmt.Errorf(
+			"%w: got %d bytes, maximum is %d",
+			ErrKeyTooLarge,
+			len(key),
+			db.limits.MaxKeyBytes,
+		)
+	}
+	return nil
+}
+
+func (db *DB) validateValue(value []byte) error {
+	if len(value) > db.limits.MaxValueBytes {
+		return fmt.Errorf(
+			"%w: got %d bytes, maximum is %d",
+			ErrValueTooLarge,
+			len(value),
+			db.limits.MaxValueBytes,
+		)
+	}
+	return nil
 }
 
 func (db *DB) newSSTable(meta manifest.SSTableMetadata) *sstable.SSTable {
@@ -368,6 +465,9 @@ func (db *DB) Get(key string) ([]byte, error) {
 	if db.closed {
 		return nil, ErrClosed
 	}
+	if err := db.validateKey(key); err != nil {
+		return nil, err
+	}
 
 	return db.getAt(key, ^uint64(0))
 }
@@ -462,6 +562,12 @@ func (db *DB) Put(key string, value []byte) error {
 	if db.closed {
 		return ErrClosed
 	}
+	if err := db.validateKey(key); err != nil {
+		return err
+	}
+	if err := db.validateValue(value); err != nil {
+		return err
+	}
 
 	seq := db.nextSeq
 
@@ -495,6 +601,9 @@ func (db *DB) Delete(key string) error {
 
 	if db.closed {
 		return ErrClosed
+	}
+	if err := db.validateKey(key); err != nil {
+		return err
 	}
 
 	seq := db.nextSeq
@@ -717,11 +826,11 @@ func (db *DB) Close() error {
 	close(db.compactionSignal)
 	db.compactionWG.Wait()
 
+	var walErr error
 	if db.wal != nil {
-		return db.wal.Close()
+		walErr = db.wal.Close()
 	}
-
-	return nil
+	return errors.Join(walErr, db.directoryLock.Close())
 }
 
 func maxSeqFromMemTable(mt *memtable.MemTable) uint64 {

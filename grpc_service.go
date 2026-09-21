@@ -174,6 +174,10 @@ func grpcError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, ErrInvalidRequest):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, ErrKeyTooLarge),
+		errors.Is(err, ErrValueTooLarge),
+		errors.Is(err, ErrBatchTooLarge):
+		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, ErrClosed), errors.Is(err, ErrSnapshotClosed):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	default:

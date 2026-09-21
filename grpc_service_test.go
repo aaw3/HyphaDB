@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"testing"
 
 	hyphadbv1 "github.com/aaw3/hyphadb/gen/hyphadb/v1"
@@ -184,5 +185,18 @@ func TestGRPCServerMapsCanceledRequests(t *testing.T) {
 	_, err := client.Get(ctx, &hyphadbv1.GetRequest{Key: "key"})
 	if status.Code(err) != codes.Canceled {
 		t.Fatalf("canceled Get code = %v, want %v", status.Code(err), codes.Canceled)
+	}
+}
+
+func TestGRPCServerMapsInputLimitsToInvalidArgument(t *testing.T) {
+	client, cleanup := newBufconnClient(t)
+	defer cleanup()
+
+	_, err := client.Put(context.Background(), &hyphadbv1.PutRequest{
+		Key:   strings.Repeat("k", 64*1024+1),
+		Value: []byte("value"),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized key code = %v, want %v", status.Code(err), codes.InvalidArgument)
 	}
 }

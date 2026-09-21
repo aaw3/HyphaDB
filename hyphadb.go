@@ -11,6 +11,10 @@ var (
 	ErrNotFound       = sstable.ErrNotFound
 	ErrSnapshotClosed = internaldb.ErrSnapshotClosed
 	ErrBatchClosed    = internaldb.ErrBatchClosed
+	ErrDatabaseLocked = internaldb.ErrDatabaseLocked
+	ErrKeyTooLarge    = internaldb.ErrKeyTooLarge
+	ErrValueTooLarge  = internaldb.ErrValueTooLarge
+	ErrBatchTooLarge  = internaldb.ErrBatchTooLarge
 )
 
 type Options struct {
@@ -18,6 +22,7 @@ type Options struct {
 	Memtable   MemtableOptions
 	Compaction CompactionOptions
 	BlockCache BlockCacheOptions
+	Limits     LimitsOptions
 }
 
 type MemtableOptions struct {
@@ -30,6 +35,15 @@ type CompactionOptions struct {
 
 type BlockCacheOptions struct {
 	CapacityBytes int
+}
+
+// LimitsOptions bounds memory used by individual writes and batches.
+// Zero values select storage-safe defaults.
+type LimitsOptions struct {
+	MaxKeyBytes        int
+	MaxValueBytes      int
+	MaxBatchOperations int
+	MaxBatchBytes      int
 }
 
 type DB struct {
@@ -58,6 +72,12 @@ func Open(opts Options) (*DB, error) {
 		},
 		BlockCache: internaldb.BlockCacheOptions{
 			CapacityBytes: opts.BlockCache.CapacityBytes,
+		},
+		Limits: internaldb.LimitsOptions{
+			MaxKeyBytes:        opts.Limits.MaxKeyBytes,
+			MaxValueBytes:      opts.Limits.MaxValueBytes,
+			MaxBatchOperations: opts.Limits.MaxBatchOperations,
+			MaxBatchBytes:      opts.Limits.MaxBatchBytes,
 		},
 	})
 	if err != nil {

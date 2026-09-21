@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -21,6 +22,7 @@ type WriteOptions struct {
 type Batch struct {
 	db         *DB
 	operations []BatchOperation
+	sizeBytes  int
 	closed     bool
 }
 
@@ -31,6 +33,15 @@ func (db *DB) NewBatch() *Batch {
 func (b *Batch) Put(key string, value []byte) error {
 	if b.closed {
 		return ErrBatchClosed
+	}
+	if err := b.db.validateKey(key); err != nil {
+		return err
+	}
+	if err := b.db.validateValue(value); err != nil {
+		return err
+	}
+	if err := b.reserveOperation(len(key) + len(value)); err != nil {
+		return err
 	}
 	b.operations = append(b.operations, BatchOperation{
 		Key:   key,
@@ -43,7 +54,32 @@ func (b *Batch) Delete(key string) error {
 	if b.closed {
 		return ErrBatchClosed
 	}
+	if err := b.db.validateKey(key); err != nil {
+		return err
+	}
+	if err := b.reserveOperation(len(key)); err != nil {
+		return err
+	}
 	b.operations = append(b.operations, BatchOperation{Key: key, Deleted: true})
+	return nil
+}
+
+func (b *Batch) reserveOperation(size int) error {
+	if len(b.operations) >= b.db.limits.MaxBatchOperations {
+		return fmt.Errorf(
+			"%w: operation count exceeds maximum %d",
+			ErrBatchTooLarge,
+			b.db.limits.MaxBatchOperations,
+		)
+	}
+	if size > b.db.limits.MaxBatchBytes-b.sizeBytes {
+		return fmt.Errorf(
+			"%w: encoded input exceeds maximum %d bytes",
+			ErrBatchTooLarge,
+			b.db.limits.MaxBatchBytes,
+		)
+	}
+	b.sizeBytes += size
 	return nil
 }
 
@@ -64,6 +100,7 @@ func (b *Batch) Cancel() error {
 	}
 	b.closed = true
 	b.operations = nil
+	b.sizeBytes = 0
 	return nil
 }
 

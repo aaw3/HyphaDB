@@ -41,6 +41,9 @@ func (s *Snapshot) Get(key string) ([]byte, error) {
 	if s.db.closed {
 		return nil, ErrClosed
 	}
+	if err := s.db.validateKey(key); err != nil {
+		return nil, err
+	}
 
 	return s.db.getAt(key, s.sequence)
 }
@@ -54,6 +57,12 @@ func (s *Snapshot) NewIterator(opts IteratorOptions) (*Iterator, error) {
 	}
 	if s.db.closed {
 		return nil, ErrClosed
+	}
+	if err := s.db.validateKey(opts.Start); err != nil {
+		return nil, err
+	}
+	if err := s.db.validateKey(opts.End); err != nil {
+		return nil, err
 	}
 
 	return s.db.newIteratorLocked(opts, s.sequence)

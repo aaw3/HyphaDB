@@ -71,6 +71,12 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 	if db.closed {
 		return nil, ErrClosed
 	}
+	if err := db.validateKey(opts.Start); err != nil {
+		return nil, err
+	}
+	if err := db.validateKey(opts.End); err != nil {
+		return nil, err
+	}
 
 	maxSeq, err := db.currentSequenceLocked()
 	if err != nil {

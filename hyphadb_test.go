@@ -2,8 +2,119 @@ package hyphadb
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func testOptions(dataDir string) Options {
+	return Options{
+		DataDir:    dataDir,
+		Memtable:   MemtableOptions{MaxEntries: 100},
+		Compaction: CompactionOptions{TableCountThreshold: 100},
+	}
+}
+
+func TestOpenExclusivelyLocksDatabaseDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	first, err := Open(testOptions(dataDir))
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+
+	if _, err := Open(testOptions(dataDir)); !errors.Is(err, ErrDatabaseLocked) {
+		t.Fatalf("second Open error = %v, want ErrDatabaseLocked", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	reopened, err := Open(testOptions(dataDir))
+	if err != nil {
+		t.Fatalf("Open after Close: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("reopened Close: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "LOCK")); err != nil {
+		t.Fatalf("persistent lock file: %v", err)
+	}
+}
+
+func TestFailedOpenReleasesDatabaseLock(t *testing.T) {
+	dataDir := t.TempDir()
+	manifestPath := filepath.Join(dataDir, "MANIFEST")
+	if err := os.WriteFile(manifestPath, []byte("corrupt"), 0600); err != nil {
+		t.Fatalf("write corrupt manifest: %v", err)
+	}
+	if _, err := Open(testOptions(dataDir)); err == nil {
+		t.Fatal("Open succeeded with corrupt manifest")
+	}
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatalf("remove corrupt manifest: %v", err)
+	}
+
+	database, err := Open(testOptions(dataDir))
+	if err != nil {
+		t.Fatalf("Open after failed Open: %v", err)
+	}
+	defer database.Close()
+}
+
+func TestPublicAPIEnforcesConfiguredInputLimits(t *testing.T) {
+	opts := testOptions(t.TempDir())
+	opts.Limits = LimitsOptions{
+		MaxKeyBytes:        4,
+		MaxValueBytes:      5,
+		MaxBatchOperations: 2,
+		MaxBatchBytes:      10,
+	}
+	database, err := Open(opts)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("12345", []byte("value")); !errors.Is(err, ErrKeyTooLarge) {
+		t.Fatalf("oversized key error = %v, want ErrKeyTooLarge", err)
+	}
+	if err := database.Put("key", []byte("123456")); !errors.Is(err, ErrValueTooLarge) {
+		t.Fatalf("oversized value error = %v, want ErrValueTooLarge", err)
+	}
+	if _, err := database.Get("12345"); !errors.Is(err, ErrKeyTooLarge) {
+		t.Fatalf("oversized Get key error = %v, want ErrKeyTooLarge", err)
+	}
+	if err := database.Delete("12345"); !errors.Is(err, ErrKeyTooLarge) {
+		t.Fatalf("oversized Delete key error = %v, want ErrKeyTooLarge", err)
+	}
+	if _, err := database.NewIterator(IteratorOptions{
+		Start: "12345",
+	}); !errors.Is(err, ErrKeyTooLarge) {
+		t.Fatalf("oversized iterator bound error = %v, want ErrKeyTooLarge", err)
+	}
+
+	batch := database.NewBatch()
+	if err := batch.Put("one", []byte("1")); err != nil {
+		t.Fatalf("first batch Put: %v", err)
+	}
+	if err := batch.Delete("two"); err != nil {
+		t.Fatalf("batch Delete: %v", err)
+	}
+	if err := batch.Put("tri", []byte("3")); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("operation limit error = %v, want ErrBatchTooLarge", err)
+	}
+	if err := batch.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	byteLimited := database.NewBatch()
+	if err := byteLimited.Put("four", []byte("12345")); err != nil {
+		t.Fatalf("byte-limited first Put: %v", err)
+	}
+	if err := byteLimited.Delete("xy"); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("byte limit error = %v, want ErrBatchTooLarge", err)
+	}
+}
 
 func TestPublicAPIStoresAndRecoversValues(t *testing.T) {
 	dataDir := t.TempDir()
