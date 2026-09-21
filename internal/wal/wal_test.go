@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"testing"
@@ -199,6 +200,121 @@ func TestReplayStatsIncludeUnappliedAndEmptyBatchIDs(t *testing.T) {
 	}
 	if _, ok := mt.Get("incomplete"); ok {
 		t.Fatal("incomplete batch was applied")
+	}
+}
+
+func TestReplayRepairsTruncatedFinalFrame(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	w, err := NewSegment(6)
+	if err != nil {
+		t.Fatalf("NewSegment: %v", err)
+	}
+	if err := w.Write("apple", 1, []byte("red")); err != nil {
+		t.Fatalf("write apple: %v", err)
+	}
+	info, err := os.Stat(SegmentPath(6))
+	if err != nil {
+		t.Fatalf("stat after first record: %v", err)
+	}
+	validSize := info.Size()
+	if err := w.Write("banana", 2, []byte("yellow")); err != nil {
+		t.Fatalf("write banana: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	info, err = os.Stat(SegmentPath(6))
+	if err != nil {
+		t.Fatalf("stat complete WAL: %v", err)
+	}
+	if err := os.Truncate(SegmentPath(6), info.Size()-3); err != nil {
+		t.Fatalf("truncate final frame: %v", err)
+	}
+
+	mt := memtable.New()
+	if err := ReplayInto(SegmentPath(6), mt); err != nil {
+		t.Fatalf("ReplayInto truncated WAL: %v", err)
+	}
+	if _, ok := mt.Get("apple"); !ok {
+		t.Fatal("complete record before truncated tail was not replayed")
+	}
+	if _, ok := mt.Get("banana"); ok {
+		t.Fatal("truncated record was replayed")
+	}
+	info, err = os.Stat(SegmentPath(6))
+	if err != nil {
+		t.Fatalf("stat repaired WAL: %v", err)
+	}
+	if info.Size() != validSize {
+		t.Fatalf("repaired WAL size = %d, want %d", info.Size(), validSize)
+	}
+
+	w, err = NewSegment(6)
+	if err != nil {
+		t.Fatalf("reopen repaired WAL: %v", err)
+	}
+	if err := w.Write("cherry", 3, []byte("dark-red")); err != nil {
+		t.Fatalf("write after repair: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close repaired WAL: %v", err)
+	}
+
+	replayed := memtable.New()
+	if err := ReplayInto(SegmentPath(6), replayed); err != nil {
+		t.Fatalf("replay after append: %v", err)
+	}
+	for _, key := range []string{"apple", "cherry"} {
+		if _, ok := replayed.Get(key); !ok {
+			t.Fatalf("missing replayed key %q", key)
+		}
+	}
+}
+
+func TestReplayRejectsCorruptFrame(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	w, err := NewSegment(7)
+	if err != nil {
+		t.Fatalf("NewSegment: %v", err)
+	}
+	if err := w.Write("apple", 1, []byte("red")); err != nil {
+		t.Fatalf("write apple: %v", err)
+	}
+	if err := w.Write("banana", 2, []byte("yellow")); err != nil {
+		t.Fatalf("write banana: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	data, err := os.ReadFile(SegmentPath(7))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	data[walHeaderSize+frameHeaderSize] ^= 0xff
+	if err := os.WriteFile(SegmentPath(7), data, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err = ReplayInto(SegmentPath(7), memtable.New())
+	if !errors.Is(err, ErrCorruptWAL) {
+		t.Fatalf("ReplayInto error = %v, want ErrCorruptWAL", err)
+	}
+}
+
+func TestNewSegmentRejectsUnknownWALFormat(t *testing.T) {
+	useTempWorkingDirectory(t)
+
+	if err := os.WriteFile(SegmentPath(8), []byte("legacy-or-corrupt"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := NewSegment(8)
+	if !errors.Is(err, ErrCorruptWAL) {
+		t.Fatalf("NewSegment error = %v, want ErrCorruptWAL", err)
 	}
 }
 

@@ -1,8 +1,11 @@
 package wal
 
 import (
-	"encoding/gob"
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,10 +18,9 @@ import (
 )
 
 type WAL struct {
-	ID      uint64
-	file    *os.File
-	Path    string
-	encoder *gob.Encoder
+	ID   uint64
+	file *os.File
+	Path string
 }
 
 type Segment struct {
@@ -31,6 +33,21 @@ type Segment struct {
 type ReplayStats struct {
 	MaxSequence uint64
 }
+
+const (
+	walVersion        uint32 = 1
+	walHeaderSize            = 8 + 4
+	frameHeaderSize          = 4 + 4
+	batchMetadataSize        = 1 + 8
+	maxFramePayload          = batchMetadataSize + record.HeaderSize +
+		record.MaxKeySize + record.MaxValueSize
+)
+
+var (
+	walMagic       = [8]byte{'H', 'Y', 'P', 'H', 'A', 'W', 'A', 'L'}
+	walCRC32CTable = crc32.MakeTable(crc32.Castagnoli)
+	ErrCorruptWAL  = errors.New("corrupt WAL")
+)
 
 func SegmentPath(id uint64) string {
 	return SegmentPathInDir(".", id)
@@ -46,18 +63,59 @@ func SegmentPathInDir(dir string, id uint64) string {
 
 func NewSegmentInDir(dir string, id uint64) (*WAL, error) {
 	path := SegmentPathInDir(dir, id)
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 
 	if err != nil {
 		return nil, err
 	}
 
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if info.Size() == 0 {
+		if err := writeWALHeader(file); err != nil {
+			file.Close()
+			return nil, err
+		}
+	} else if err := validateWALHeader(file); err != nil {
+		file.Close()
+		return nil, err
+	}
+
 	return &WAL{
-		ID:      id,
-		file:    file,
-		Path:    path,
-		encoder: gob.NewEncoder(file),
+		ID:   id,
+		file: file,
+		Path: path,
 	}, nil
+}
+
+func writeWALHeader(w io.Writer) error {
+	var header [walHeaderSize]byte
+	copy(header[:8], walMagic[:])
+	binary.LittleEndian.PutUint32(header[8:12], walVersion)
+	_, err := w.Write(header[:])
+	return err
+}
+
+func validateWALHeader(r io.ReaderAt) error {
+	var header [walHeaderSize]byte
+	if _, err := r.ReadAt(header[:], 0); err != nil {
+		return fmt.Errorf("%w: read header: %v", ErrCorruptWAL, err)
+	}
+	if !bytes.Equal(header[:8], walMagic[:]) {
+		return fmt.Errorf("%w: invalid file magic", ErrCorruptWAL)
+	}
+	version := binary.LittleEndian.Uint32(header[8:12])
+	if version != walVersion {
+		return fmt.Errorf(
+			"%w: unsupported version %d",
+			ErrCorruptWAL,
+			version,
+		)
+	}
+	return nil
 }
 
 func RemoveSegment(id uint64) error {
@@ -132,8 +190,78 @@ func (w *WAL) Write(key string, seq uint64, value []byte) error {
 	})
 }
 
-func (w *WAL) WriteRecord(record record.Record) error {
-	return w.encoder.Encode(record)
+func (w *WAL) WriteRecord(rec record.Record) error {
+	payload, err := encodeRecord(rec)
+	if err != nil {
+		return err
+	}
+
+	var header [frameHeaderSize]byte
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(
+		header[4:8],
+		frameChecksum(header[0:4], payload),
+	)
+
+	frame := make([]byte, 0, len(header)+len(payload))
+	frame = append(frame, header[:]...)
+	frame = append(frame, payload...)
+	if _, err := w.file.Write(frame); err != nil {
+		return err
+	}
+	return nil
+}
+
+func encodeRecord(rec record.Record) ([]byte, error) {
+	if len(rec.Key) > record.MaxKeySize {
+		return nil, fmt.Errorf("key length %d exceeds maximum", len(rec.Key))
+	}
+	if len(rec.Value) > record.MaxValueSize {
+		return nil, fmt.Errorf("value length %d exceeds maximum", len(rec.Value))
+	}
+	if rec.BatchKind > record.BatchCommit {
+		return nil, fmt.Errorf("invalid batch kind %d", rec.BatchKind)
+	}
+
+	payload := bytes.NewBuffer(make([]byte, 0, batchMetadataSize+record.EncodedSize(rec)))
+	payload.WriteByte(byte(rec.BatchKind))
+	var batchID [8]byte
+	binary.LittleEndian.PutUint64(batchID[:], rec.BatchID)
+	payload.Write(batchID[:])
+	if err := record.EncodeBinary(payload, rec); err != nil {
+		return nil, err
+	}
+	return payload.Bytes(), nil
+}
+
+func decodeRecord(payload []byte) (record.Record, error) {
+	if len(payload) < batchMetadataSize+record.HeaderSize {
+		return record.Record{}, fmt.Errorf("record payload is too small")
+	}
+
+	kind := record.BatchKind(payload[0])
+	if kind > record.BatchCommit {
+		return record.Record{}, fmt.Errorf("invalid batch kind %d", kind)
+	}
+	batchID := binary.LittleEndian.Uint64(payload[1:9])
+	r := bytes.NewReader(payload[batchMetadataSize:])
+	rec, err := record.DecodeBinary(r)
+	if err != nil {
+		return record.Record{}, err
+	}
+	if r.Len() != 0 {
+		return record.Record{}, fmt.Errorf("record payload has %d trailing bytes", r.Len())
+	}
+	rec.BatchID = batchID
+	rec.BatchKind = kind
+	return rec, nil
+}
+
+func frameChecksum(length, payload []byte) uint32 {
+	checksum := crc32.New(walCRC32CTable)
+	_, _ = checksum.Write(length)
+	_, _ = checksum.Write(payload)
+	return checksum.Sum32()
 }
 
 func (w *WAL) WriteBatch(batchID uint64, records []record.Record, sync bool) error {
@@ -168,7 +296,7 @@ func ReplayInto(path string, mt *memtable.MemTable) error {
 }
 
 func ReplayIntoWithStats(path string, mt *memtable.MemTable) (ReplayStats, error) {
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
 
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -179,17 +307,77 @@ func ReplayIntoWithStats(path string, mt *memtable.MemTable) (ReplayStats, error
 	defer file.Close()
 
 	var stats ReplayStats
-	decoder := gob.NewDecoder(file)
+	info, err := file.Stat()
+	if err != nil {
+		return ReplayStats{}, err
+	}
+	if info.Size() == 0 {
+		return stats, nil
+	}
+	if err := validateWALHeader(file); err != nil {
+		return ReplayStats{}, err
+	}
+	if _, err := file.Seek(walHeaderSize, io.SeekStart); err != nil {
+		return ReplayStats{}, err
+	}
+
+	validOffset := int64(walHeaderSize)
 	pending := make(map[uint64][]record.Record)
 	for {
-		var rec record.Record
-		if err := decoder.Decode(&rec); err != nil {
-			if err == io.EOF {
-				// EOF
+		var header [frameHeaderSize]byte
+		_, err := io.ReadFull(file, header[:])
+		if err == io.EOF {
+			break
+		}
+		if err == io.ErrUnexpectedEOF {
+			if err := file.Truncate(validOffset); err != nil {
+				return ReplayStats{}, err
+			}
+			break
+		}
+		if err != nil {
+			return ReplayStats{}, err
+		}
+
+		payloadLen := binary.LittleEndian.Uint32(header[0:4])
+		if payloadLen > maxFramePayload {
+			return ReplayStats{}, fmt.Errorf(
+				"%w: frame length %d exceeds maximum %d",
+				ErrCorruptWAL,
+				payloadLen,
+				maxFramePayload,
+			)
+		}
+		payload := make([]byte, int(payloadLen))
+		if _, err := io.ReadFull(file, payload); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				if err := file.Truncate(validOffset); err != nil {
+					return ReplayStats{}, err
+				}
 				break
 			}
 			return ReplayStats{}, err
 		}
+
+		wantChecksum := binary.LittleEndian.Uint32(header[4:8])
+		gotChecksum := frameChecksum(header[0:4], payload)
+		if wantChecksum != gotChecksum {
+			return ReplayStats{}, fmt.Errorf(
+				"%w: frame checksum mismatch at offset %d",
+				ErrCorruptWAL,
+				validOffset,
+			)
+		}
+		rec, err := decodeRecord(payload)
+		if err != nil {
+			return ReplayStats{}, fmt.Errorf(
+				"%w: decode frame at offset %d: %v",
+				ErrCorruptWAL,
+				validOffset,
+				err,
+			)
+		}
+		validOffset += int64(frameHeaderSize) + int64(payloadLen)
 		if rec.Seq > stats.MaxSequence {
 			stats.MaxSequence = rec.Seq
 		}
