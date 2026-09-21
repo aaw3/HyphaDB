@@ -70,6 +70,18 @@ They are intended as repeatable local baselines; cross-database comparisons
 will use a shared workload harness with equivalent durability and cache
 settings.
 
+Cross-database benchmarks live in the isolated `benchmarks` module. Run the
+adapter tests and benchmark smoke test with:
+
+```sh
+cd benchmarks
+go test ./...
+go test -run '^$' -bench . -benchtime=1x ./...
+```
+
+See `benchmarks/README.md` for fixed-work comparisons, deterministic dataset
+seeds, and physical-filesystem storage configuration.
+
 The module root exposes the embedded Go API. The internal storage engine is in
 `internal/db`, and a versioned gRPC storage contract is available under
 `proto/hyphadb/v1`.
