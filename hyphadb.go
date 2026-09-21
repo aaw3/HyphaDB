@@ -18,6 +18,8 @@ var (
 )
 
 type Options struct {
+	// DataDir is the directory containing all database files. An empty value
+	// uses the current working directory.
 	DataDir    string
 	Memtable   MemtableOptions
 	Compaction CompactionOptions
@@ -26,14 +28,20 @@ type Options struct {
 }
 
 type MemtableOptions struct {
+	// MaxEntries controls when the active memtable is rotated. Zero selects a
+	// default. Negative values are invalid.
 	MaxEntries int
 }
 
 type CompactionOptions struct {
+	// TableCountThreshold controls when L0 compaction is scheduled. Zero
+	// selects a default. Negative values are invalid.
 	TableCountThreshold int
 }
 
 type BlockCacheOptions struct {
+	// CapacityBytes bounds the SSTable block cache. Zero selects a default.
+	// Negative values are invalid.
 	CapacityBytes int
 }
 
@@ -50,6 +58,11 @@ type DB struct {
 	inner *internaldb.DB
 }
 
+// New opens a database in the current working directory using the supplied
+// memtable and compaction thresholds.
+//
+// Deprecated: use Open with Options. New relies on process-wide working
+// directory state and cannot configure the rest of the database.
 func New(maxMemtableSize, compactionThreshold int) (*DB, error) {
 	return Open(Options{
 		Memtable: MemtableOptions{
@@ -61,6 +74,8 @@ func New(maxMemtableSize, compactionThreshold int) (*DB, error) {
 	})
 }
 
+// Open opens or creates a database. Zero-valued tuning options select built-in
+// defaults, so callers normally only need to provide DataDir.
 func Open(opts Options) (*DB, error) {
 	inner, err := internaldb.Open(internaldb.Options{
 		DataDir: opts.DataDir,

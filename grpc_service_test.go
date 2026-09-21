@@ -20,17 +20,9 @@ const grpcBufferSize = 1024 * 1024
 func newBufconnClient(t *testing.T) (hyphadbv1.StorageServiceClient, func()) {
 	t.Helper()
 
-	db, err := Open(Options{
-		DataDir: t.TempDir(),
-		Memtable: MemtableOptions{
-			MaxEntries: 100,
-		},
-		Compaction: CompactionOptions{
-			TableCountThreshold: 100,
-		},
-	})
+	db, err := Open(Options{DataDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	service := NewService(db)
 	listener := bufconn.Listen(grpcBufferSize)

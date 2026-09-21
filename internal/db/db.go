@@ -54,9 +54,11 @@ var (
 )
 
 const (
-	defaultBlockCacheCapacity = 64 * 1024 * 1024
-	defaultMaxBatchOperations = 10_000
-	defaultMaxBatchBytes      = 128 * 1024 * 1024
+	defaultMaxMemtableEntries  = 10_000
+	defaultCompactionThreshold = 4
+	defaultBlockCacheCapacity  = 64 * 1024 * 1024
+	defaultMaxBatchOperations  = 10_000
+	defaultMaxBatchBytes       = 128 * 1024 * 1024
 )
 
 type Options struct {
@@ -68,14 +70,20 @@ type Options struct {
 }
 
 type MemtableOptions struct {
+	// MaxEntries controls when the active memtable is rotated. Zero selects
+	// the default. Negative values are invalid.
 	MaxEntries int
 }
 
 type CompactionOptions struct {
+	// TableCountThreshold controls when L0 compaction is scheduled. Zero
+	// selects the default. Negative values are invalid.
 	TableCountThreshold int
 }
 
 type BlockCacheOptions struct {
+	// CapacityBytes bounds the SSTable block cache. Zero selects the default.
+	// Negative values are invalid.
 	CapacityBytes int
 }
 
@@ -103,13 +111,22 @@ func Open(opts Options) (*DB, error) {
 	if opts.DataDir == "" {
 		opts.DataDir = "."
 	}
-	if opts.Memtable.MaxEntries <= 0 {
-		return nil, fmt.Errorf("max memtable size must be positive")
+	if opts.Memtable.MaxEntries < 0 {
+		return nil, fmt.Errorf("max memtable size cannot be negative")
 	}
-	if opts.Compaction.TableCountThreshold <= 0 {
-		return nil, fmt.Errorf("compaction threshold must be positive")
+	if opts.Memtable.MaxEntries == 0 {
+		opts.Memtable.MaxEntries = defaultMaxMemtableEntries
 	}
-	if opts.BlockCache.CapacityBytes <= 0 {
+	if opts.Compaction.TableCountThreshold < 0 {
+		return nil, fmt.Errorf("compaction threshold cannot be negative")
+	}
+	if opts.Compaction.TableCountThreshold == 0 {
+		opts.Compaction.TableCountThreshold = defaultCompactionThreshold
+	}
+	if opts.BlockCache.CapacityBytes < 0 {
+		return nil, fmt.Errorf("block cache capacity cannot be negative")
+	}
+	if opts.BlockCache.CapacityBytes == 0 {
 		opts.BlockCache.CapacityBytes = defaultBlockCacheCapacity
 	}
 	if err := normalizeLimits(&opts.Limits); err != nil {

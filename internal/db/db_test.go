@@ -190,6 +190,21 @@ func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
 	}
 }
 
+func TestOpenAppliesDefaultTuningOptions(t *testing.T) {
+	database, err := Open(Options{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	if database.maxMemtableSize != defaultMaxMemtableEntries {
+		t.Fatalf("max memtable entries = %d, want %d", database.maxMemtableSize, defaultMaxMemtableEntries)
+	}
+	if database.compactionThreshold != defaultCompactionThreshold {
+		t.Fatalf("compaction threshold = %d, want %d", database.compactionThreshold, defaultCompactionThreshold)
+	}
+}
+
 func TestOpenAdvancesSequenceAndWALIDFromRecoveredSegments(t *testing.T) {
 	useTempWorkingDirectory(t)
 

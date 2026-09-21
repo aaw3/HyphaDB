@@ -24,13 +24,29 @@ The database supports the following operations through its Go package:
 - `Compact`
 - `Close`
 
+Open a database by providing its storage directory. Tuning fields are optional
+and use defaults when left at zero:
+
+```go
+database, err := hyphadb.Open(hyphadb.Options{DataDir: "./data"})
+if err != nil {
+	return err
+}
+defer database.Close()
+```
+
+`New` remains available for compatibility but is deprecated in favor of
+`Open`, which does not require changing the process working directory and can
+represent the complete database configuration.
+
 Deletes are represented as tombstones and are suppressed from reads and scans. Records are ordered by key, with sequence numbers used to resolve newer versions of the same key.
 
 ## Recovery and storage
 
 Writes are appended to the WAL before being applied to the active memtable. When the database is opened, WAL segments are replayed before normal operation resumes. Memtables are flushed into SSTables in the background, and compaction merges SSTables as their number grows.
 
-The current implementation uses files in the process working directory, including `MANIFEST`, WAL segments, and SSTables.
+The current implementation keeps `MANIFEST`, WAL segments, SSTables, and its
+ownership lock under the configured `DataDir`.
 
 ## Development
 
@@ -41,8 +57,12 @@ go test ./...
 go test -race ./...
 ```
 
-The reusable database implementation is currently in `internal/db`. A public package, command-line interface, and server interface are currently in the works.
+The module root exposes the embedded Go API. The internal storage engine is in
+`internal/db`, and a versioned gRPC storage contract is available under
+`proto/hyphadb/v1`.
 
 ## Direction
 
-The next architectural step is to stabilize the storage API and configuration, then place a service layer in front of it. The likely network interface is versioned gRPC over TCP, with gRPC over a Unix domain socket for local clients. This will allow clients in other languages to use generated, typed APIs without depending on HyphaDB's on-disk formats or internal packages.
+The next architectural step is to establish repeatable benchmark workloads,
+then use their results to guide storage-engine optimization before building the
+document and embeddings layers.

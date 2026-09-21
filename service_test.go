@@ -7,11 +7,7 @@ import (
 )
 
 func TestStorageServiceCRUDAndPaginatedScan(t *testing.T) {
-	database, err := Open(Options{
-		DataDir:    t.TempDir(),
-		Memtable:   MemtableOptions{MaxEntries: 100},
-		Compaction: CompactionOptions{TableCountThreshold: 100},
-	})
+	database, err := Open(Options{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -76,11 +72,7 @@ func TestStorageServiceCRUDAndPaginatedScan(t *testing.T) {
 }
 
 func TestStorageServiceRejectsCanceledRequest(t *testing.T) {
-	database, err := Open(Options{
-		DataDir:    t.TempDir(),
-		Memtable:   MemtableOptions{MaxEntries: 100},
-		Compaction: CompactionOptions{TableCountThreshold: 100},
-	})
+	database, err := Open(Options{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

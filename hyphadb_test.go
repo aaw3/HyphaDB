@@ -8,10 +8,62 @@ import (
 )
 
 func testOptions(dataDir string) Options {
-	return Options{
-		DataDir:    dataDir,
-		Memtable:   MemtableOptions{MaxEntries: 100},
-		Compaction: CompactionOptions{TableCountThreshold: 100},
+	return Options{DataDir: dataDir}
+}
+
+func TestOpenUsesDefaultTuningOptions(t *testing.T) {
+	database, err := Open(Options{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.Put("apple", []byte("green")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	value, err := database.Get("apple")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(value) != "green" {
+		t.Fatalf("apple = %q, want green", value)
+	}
+}
+
+func TestOpenRejectsNegativeTuningOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options Options
+	}{
+		{
+			name: "memtable entries",
+			options: Options{
+				DataDir:  t.TempDir(),
+				Memtable: MemtableOptions{MaxEntries: -1},
+			},
+		},
+		{
+			name: "compaction threshold",
+			options: Options{
+				DataDir:    t.TempDir(),
+				Compaction: CompactionOptions{TableCountThreshold: -1},
+			},
+		},
+		{
+			name: "block cache capacity",
+			options: Options{
+				DataDir:    t.TempDir(),
+				BlockCache: BlockCacheOptions{CapacityBytes: -1},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Open(test.options); err == nil {
+				t.Fatal("Open succeeded with a negative option")
+			}
+		})
 	}
 }
 
