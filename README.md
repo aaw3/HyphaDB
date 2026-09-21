@@ -57,6 +57,19 @@ go test ./...
 go test -race ./...
 ```
 
+Run the embedded API microbenchmarks with:
+
+```sh
+go test -run '^$' -bench . -benchmem ./...
+```
+
+The initial benchmarks separate active-memtable reads from persisted-SSTable
+warm-cache reads and keep fixture creation and key generation outside the timed
+region. No-flush write benchmarks intentionally isolate WAL and memtable costs.
+They are intended as repeatable local baselines; cross-database comparisons
+will use a shared workload harness with equivalent durability and cache
+settings.
+
 The module root exposes the embedded Go API. The internal storage engine is in
 `internal/db`, and a versioned gRPC storage contract is available under
 `proto/hyphadb/v1`.
