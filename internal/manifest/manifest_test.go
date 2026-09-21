@@ -196,6 +196,64 @@ func TestWriteRejectsOversizedMetadata(t *testing.T) {
 	}
 }
 
+func TestWriteReportsFailureAfterManifestIsPublished(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "MANIFEST")
+	want := &Manifest{
+		NextSSTableID: 9,
+		SSTables:      []SSTableMetadata{},
+	}
+
+	originalSyncParent := syncParent
+	syncParent = func(string) error {
+		return errors.New("injected directory sync failure")
+	}
+	t.Cleanup(func() {
+		syncParent = originalSyncParent
+	})
+
+	err := Write(path, want)
+	if !IsPublished(err) {
+		t.Fatalf("Write error = %v, want published error", err)
+	}
+
+	got, readErr := Read(path)
+	if readErr != nil {
+		t.Fatalf("Read published manifest: %v", readErr)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("published manifest = %+v, want %+v", got, want)
+	}
+	if _, statErr := os.Stat(path + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatalf("temporary manifest remains after rename: %v", statErr)
+	}
+}
+
+func TestFailedWritePreservesExistingManifest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "MANIFEST")
+	want := &Manifest{
+		NextSSTableID: 4,
+		SSTables:      []SSTableMetadata{},
+	}
+	if err := Write(path, want); err != nil {
+		t.Fatalf("initial Write: %v", err)
+	}
+
+	err := Write(path, &Manifest{SSTables: []SSTableMetadata{{
+		Path: strings.Repeat("x", maxMetadataStringSize+1),
+	}}})
+	if err == nil {
+		t.Fatal("invalid replacement Write succeeded")
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read original manifest: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("manifest after failed replacement = %+v, want %+v", got, want)
+	}
+}
+
 func TestReadMissingManifestReturnsDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "MANIFEST")
 

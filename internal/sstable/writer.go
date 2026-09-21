@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/aaw3/hyphadb/internal/bloom"
+	"github.com/aaw3/hyphadb/internal/fsutil"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -65,11 +66,15 @@ func CreateFromIteratorWithOptions(
 		}
 	}
 
-	file, err := os.Create(path)
+	tmpPath := path + ".tmp"
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		file.Close()
+		os.Remove(tmpPath)
+	}()
 
 	var index []IndexEntry
 	var logicalBlock bytes.Buffer
@@ -260,6 +265,18 @@ func CreateFromIteratorWithOptions(
 
 	fileInfo, err := file.Stat()
 	if err != nil {
+		return nil, err
+	}
+	if err := file.Sync(); err != nil {
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return nil, err
+	}
+	if err := fsutil.SyncParent(path); err != nil {
 		return nil, err
 	}
 

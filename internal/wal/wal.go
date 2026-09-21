@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aaw3/hyphadb/internal/fsutil"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
 )
@@ -79,6 +80,14 @@ func NewSegmentInDir(dir string, id uint64) (*WAL, error) {
 			file.Close()
 			return nil, err
 		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			return nil, err
+		}
+		if err := fsutil.SyncParent(path); err != nil {
+			file.Close()
+			return nil, err
+		}
 	} else if err := validateWALHeader(file); err != nil {
 		file.Close()
 		return nil, err
@@ -123,12 +132,16 @@ func RemoveSegment(id uint64) error {
 }
 
 func RemoveSegmentInDir(dir string, id uint64) error {
-	err := os.Remove(SegmentPathInDir(dir, id))
+	path := SegmentPathInDir(dir, id)
+	err := os.Remove(path)
 	// file already deleted
 	if os.IsNotExist(err) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return fsutil.SyncParent(path)
 }
 
 func ListSegments() ([]Segment, error) {

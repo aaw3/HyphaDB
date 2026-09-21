@@ -9,6 +9,8 @@ import (
 	"io"
 	"math"
 	"os"
+
+	"github.com/aaw3/hyphadb/internal/fsutil"
 )
 
 type Manifest struct {
@@ -44,7 +46,30 @@ var (
 
 	ErrCorruptManifest            = errors.New("corrupt manifest")
 	ErrUnsupportedManifestVersion = errors.New("unsupported manifest version")
+
+	syncParent = fsutil.SyncParent
 )
+
+// PublishError reports a failure after the new manifest was renamed into place.
+// Callers must retain the state described by the manifest because it is
+// visible in the current filesystem namespace, even though its directory
+// entry could not be confirmed durable.
+type PublishError struct {
+	Err error
+}
+
+func (e *PublishError) Error() string {
+	return fmt.Sprintf("manifest published but directory sync failed: %v", e.Err)
+}
+
+func (e *PublishError) Unwrap() error {
+	return e.Err
+}
+
+func IsPublished(err error) bool {
+	var publishErr *PublishError
+	return errors.As(err, &publishErr)
+}
 
 func Read(path string) (*Manifest, error) {
 	file, err := os.Open(path)
@@ -124,12 +149,24 @@ func Write(path string, manifest *Manifest) error {
 		os.Remove(tmpPath)
 		return err
 	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return err
+	}
 	if err := file.Close(); err != nil {
 		os.Remove(tmpPath)
 		return err
 	}
 
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := syncParent(path); err != nil {
+		return &PublishError{Err: err}
+	}
+	return nil
 }
 
 func encode(m *Manifest) ([]byte, error) {

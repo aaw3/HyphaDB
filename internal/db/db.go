@@ -10,6 +10,7 @@ import (
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/compaction"
+	"github.com/aaw3/hyphadb/internal/fsutil"
 	"github.com/aaw3/hyphadb/internal/manifest"
 	"github.com/aaw3/hyphadb/internal/memtable"
 	"github.com/aaw3/hyphadb/internal/record"
@@ -292,7 +293,8 @@ func (db *DB) compactLocked(threshold int) error {
 	}
 	db.manifest.SSTables = newMetadata
 
-	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+	manifestErr := manifest.Write(db.manifestPath, db.manifest)
+	if manifestErr != nil && !manifest.IsPublished(manifestErr) {
 		// Restore in-memory manifest since persistence failed
 		db.manifest.NextSSTableID = oldNextSSTableID
 		db.manifest.SSTables = oldTables
@@ -305,7 +307,7 @@ func (db *DB) compactLocked(threshold int) error {
 				removeErr,
 			)
 		}
-		return err
+		return manifestErr
 	}
 
 	newSSTables := make([]*sstable.SSTable, 0,
@@ -325,21 +327,36 @@ func (db *DB) compactLocked(threshold int) error {
 	}
 	oldSSTables := db.sstables
 	db.sstables = newSSTables
+	if manifestErr != nil {
+		// The rename is visible, so retain the newly published state. Keep the
+		// old files as a safe fallback because directory durability is unknown.
+		return manifestErr
+	}
 
+	removedOldTable := false
+	var cleanupErr error
 	for _, sst := range oldSSTables {
 		if _, selected := selectedIDs[sst.ID]; !selected {
 			continue
 		}
-		if err := os.Remove(sst.Path); err != nil {
+		if err := os.Remove(sst.Path); err != nil && !os.IsNotExist(err) {
 			log.Printf("failed while deleting old SSTable %s: %v",
 				sst.Path,
 				err,
 			)
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else if err == nil {
+			removedOldTable = true
 		}
 		db.blockCache.PurgeTable(sst.ID)
 	}
+	if removedOldTable {
+		if err := fsutil.SyncDir(db.dataDir); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
 
-	return nil
+	return cleanupErr
 }
 
 func (db *DB) Get(key string) ([]byte, error) {
@@ -641,7 +658,8 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	db.sstables = append(db.sstables, sst)
 	db.manifest.SSTables = append(db.manifest.SSTables, meta)
 
-	if err := manifest.Write(db.manifestPath, db.manifest); err != nil {
+	manifestErr := manifest.Write(db.manifestPath, db.manifest)
+	if manifestErr != nil && !manifest.IsPublished(manifestErr) {
 		db.sstables = db.sstables[:oldSSTableCount]
 		db.manifest.SSTables = db.manifest.SSTables[:oldMetadataCount]
 		db.manifest.NextSSTableID = oldNextSSTableID
@@ -656,7 +674,7 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 			)
 		}
 
-		return err
+		return manifestErr
 	}
 
 	if len(db.immutableMemtables) > 0 && db.immutableMemtables[0] == imm {
@@ -665,6 +683,12 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	}
 
 	db.mu.Unlock()
+	if manifestErr != nil {
+		// Keep the WAL when directory durability is uncertain. Recovery may
+		// replay duplicate sequence numbers, which is safe and preferable to
+		// losing the only durable copy.
+		return manifestErr
+	}
 
 	if err := wal.RemoveSegmentInDir(db.dataDir, imm.WalID); err != nil {
 		return err
