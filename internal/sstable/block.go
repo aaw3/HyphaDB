@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"unsafe"
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
 	"github.com/aaw3/hyphadb/internal/compression"
@@ -200,6 +201,142 @@ func decodeLogicalBlock(buf []byte) ([]record.Record, error) {
 	}
 
 	return records, nil
+}
+
+// logicalBlockCursor walks records directly from an immutable logical block.
+// Records returned by next reference data owned by the block, so the block must
+// remain alive and must not be modified while those records are in use.
+type logicalBlockCursor struct {
+	data   []byte
+	count  uint32
+	index  uint32
+	offset int
+	err    error
+}
+
+func newLogicalBlockCursor(buf []byte) (logicalBlockCursor, error) {
+	if len(buf) < 4 {
+		return logicalBlockCursor{}, fmt.Errorf(
+			"%w: logical block missing record count",
+			ErrCorruptSSTable,
+		)
+	}
+
+	count := binary.LittleEndian.Uint32(buf[:4])
+	remaining := len(buf) - 4
+	if uint64(count) > uint64(remaining)/uint64(record.HeaderSize) {
+		return logicalBlockCursor{}, fmt.Errorf(
+			"%w: record count %d cannot fit in block with %d remaining bytes",
+			ErrCorruptSSTable,
+			count,
+			remaining,
+		)
+	}
+
+	return logicalBlockCursor{
+		data:   buf,
+		count:  count,
+		offset: 4,
+	}, nil
+}
+
+func (c *logicalBlockCursor) next() (record.Record, bool) {
+	if c.err != nil {
+		return record.Record{}, false
+	}
+
+	if c.index == c.count {
+		if c.offset != len(c.data) {
+			c.err = fmt.Errorf(
+				"%w: block has %d unexpected trailing bytes",
+				ErrCorruptSSTable,
+				len(c.data)-c.offset,
+			)
+		}
+		return record.Record{}, false
+	}
+
+	rec, size, err := decodeRecordView(c.data[c.offset:])
+	if err != nil {
+		c.err = fmt.Errorf(
+			"%w: decode record %d: %v",
+			ErrCorruptSSTable,
+			c.index,
+			err,
+		)
+		return record.Record{}, false
+	}
+
+	c.offset += size
+	c.index++
+	return rec, true
+}
+
+// decodeRecordView decodes one record without copying its key or value. The
+// caller owns the lifetime and immutability of buf.
+func decodeRecordView(buf []byte) (record.Record, int, error) {
+	if len(buf) < record.HeaderSize {
+		return record.Record{}, 0, io.ErrUnexpectedEOF
+	}
+
+	keyLen := binary.LittleEndian.Uint32(buf[0:4])
+	valueLen := binary.LittleEndian.Uint32(buf[4:8])
+	seq := binary.LittleEndian.Uint64(buf[8:16])
+	flags := buf[16]
+
+	if flags&^record.FlagDeleted != 0 {
+		return record.Record{}, 0, fmt.Errorf(
+			"unknown record flags: %08b",
+			flags,
+		)
+	}
+	if keyLen > record.MaxKeySize {
+		return record.Record{}, 0, fmt.Errorf(
+			"key length %d exceeds maximum allowed size %d",
+			keyLen,
+			record.MaxKeySize,
+		)
+	}
+	if valueLen > record.MaxValueSize {
+		return record.Record{}, 0, fmt.Errorf(
+			"value length %d exceeds maximum allowed size %d",
+			valueLen,
+			record.MaxValueSize,
+		)
+	}
+
+	payloadLen := uint64(keyLen) + uint64(valueLen)
+	if payloadLen > uint64(len(buf)-record.HeaderSize) {
+		return record.Record{}, 0, fmt.Errorf(
+			"record requires %d payload bytes, but only %d bytes remain",
+			payloadLen,
+			len(buf)-record.HeaderSize,
+		)
+	}
+
+	keyStart := record.HeaderSize
+	keyEnd := keyStart + int(keyLen)
+	valueEnd := keyEnd + int(valueLen)
+	keyBytes := buf[keyStart:keyEnd]
+
+	var key string
+	if len(keyBytes) > 0 {
+		key = unsafe.String(unsafe.SliceData(keyBytes), len(keyBytes))
+	}
+
+	var value []byte
+	if valueLen > 0 {
+		value = buf[keyEnd:valueEnd]
+	}
+
+	return record.Record{
+		Key: key,
+		Seq: seq,
+		Entry: record.Entry{
+			Value:   value,
+			Deleted: flags&record.FlagDeleted != 0,
+		},
+	}, valueEnd, nil
 }
 
 func decodeBlock(physical []byte) ([]record.Record, error) {

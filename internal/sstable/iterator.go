@@ -2,22 +2,22 @@ package sstable
 
 import (
 	"os"
-	"sort"
 
 	"github.com/aaw3/hyphadb/internal/record"
 )
 
 type Iterator struct {
-	sst          *SSTable
-	file         *os.File
-	index        []IndexEntry
-	blockIndex   int
-	blockRecords []record.Record
-	recordIndex  int
-	current      record.Record
-	err          error
-	refHeld      bool
-	closed       bool
+	sst         *SSTable
+	file        *os.File
+	index       []IndexEntry
+	blockIndex  int
+	blockCursor logicalBlockCursor
+	current     record.Record
+	pending     record.Record
+	hasPending  bool
+	err         error
+	refHeld     bool
+	closed      bool
 }
 
 // Compile-time check that *Iterator satisfies the shared record iterator API.
@@ -45,12 +45,11 @@ func (s *SSTable) Iterator() (*Iterator, error) {
 	s.metaMu.RUnlock()
 
 	return &Iterator{
-		sst:         s,
-		file:        file,
-		index:       index,
-		blockIndex:  -1,
-		recordIndex: -1,
-		refHeld:     true,
+		sst:        s,
+		file:       file,
+		index:      index,
+		blockIndex: -1,
+		refHeld:    true,
 	}, nil
 }
 
@@ -59,8 +58,10 @@ func (it *Iterator) Seek(key string) error {
 		return it.err
 	}
 
-	it.blockRecords = nil
-	it.recordIndex = -1
+	it.blockCursor = logicalBlockCursor{}
+	it.current = record.Record{}
+	it.pending = record.Record{}
+	it.hasPending = false
 
 	if len(it.index) == 0 {
 		it.blockIndex = 0
@@ -73,16 +74,21 @@ func (it *Iterator) Seek(key string) error {
 		return err
 	}
 
-	recordIndex := sort.Search(len(it.blockRecords), func(i int) bool {
-		return it.blockRecords[i].Key >= key
-	})
-	if recordIndex < len(it.blockRecords) {
-		it.recordIndex = recordIndex - 1
-		return nil
+	for {
+		rec, ok := it.blockCursor.next()
+		if !ok {
+			if it.blockCursor.err != nil {
+				it.err = it.blockCursor.err
+				return it.err
+			}
+			return nil
+		}
+		if rec.Key >= key {
+			it.pending = rec
+			it.hasPending = true
+			return nil
+		}
 	}
-
-	it.recordIndex = len(it.blockRecords) - 1
-	return nil
 }
 
 func (it *Iterator) Next() bool {
@@ -90,34 +96,33 @@ func (it *Iterator) Next() bool {
 		return false
 	}
 
-	it.recordIndex++
-
-	// return  a record while there are still records in the current block
-	if it.recordIndex < len(it.blockRecords) {
-		it.current = it.blockRecords[it.recordIndex]
+	if it.hasPending {
+		it.current = it.pending
+		it.pending = record.Record{}
+		it.hasPending = false
 		return true
 	}
 
-	// move to the next block
-	it.blockIndex++
-	if it.blockIndex >= len(it.index) {
-		return false
+	for {
+		rec, ok := it.blockCursor.next()
+		if ok {
+			it.current = rec
+			return true
+		}
+		if it.blockCursor.err != nil {
+			it.err = it.blockCursor.err
+			return false
+		}
+
+		it.blockIndex++
+		if it.blockIndex >= len(it.index) {
+			return false
+		}
+
+		if err := it.loadBlock(it.blockIndex); err != nil {
+			return false
+		}
 	}
-
-	if err := it.loadBlock(it.blockIndex); err != nil {
-		it.err = err
-		return false
-	}
-
-	it.recordIndex = 0
-
-	// if the block has no records, move to the next block
-	if len(it.blockRecords) == 0 {
-		return it.Next()
-	}
-
-	it.current = it.blockRecords[it.recordIndex]
-	return true
 }
 
 func (it *Iterator) loadBlock(blockIndex int) error {
@@ -127,14 +132,14 @@ func (it *Iterator) loadBlock(blockIndex int) error {
 		return err
 	}
 
-	records, err := decodeLogicalBlock(logical)
+	cursor, err := newLogicalBlockCursor(logical)
 	if err != nil {
 		it.err = err
 		return err
 	}
 
 	it.blockIndex = blockIndex
-	it.blockRecords = records
+	it.blockCursor = cursor
 	return nil
 }
 

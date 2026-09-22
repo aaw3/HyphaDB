@@ -197,6 +197,118 @@ func TestDecodeLogicalBlockRejectsImpossibleRecordCount(t *testing.T) {
 	requireErrorIs(t, err, ErrCorruptSSTable)
 }
 
+func TestLogicalBlockCursorReturnsRecordViews(t *testing.T) {
+	logical := makeLogicalBlock(t, []record.Record{
+		{Key: "apple", Seq: 7, Entry: record.Entry{Value: []byte("green")}},
+		{Key: "banana", Seq: 4, Entry: record.Entry{Deleted: true}},
+	})
+
+	cursor, err := newLogicalBlockCursor(logical)
+	if err != nil {
+		t.Fatalf("newLogicalBlockCursor: %v", err)
+	}
+
+	first, ok := cursor.next()
+	if !ok {
+		t.Fatalf("first record missing: %v", cursor.err)
+	}
+	if first.Key != "apple" || first.Seq != 7 || string(first.Value) != "green" {
+		t.Fatalf("first record = %+v", first)
+	}
+
+	valueOffset := 4 + record.HeaderSize + len(first.Key)
+	logical[valueOffset] = 'G'
+	if got := string(first.Value); got != "Green" {
+		t.Fatalf("value view = %q, want %q", got, "Green")
+	}
+
+	second, ok := cursor.next()
+	if !ok {
+		t.Fatalf("second record missing: %v", cursor.err)
+	}
+	if second.Key != "banana" || second.Seq != 4 || !second.Deleted {
+		t.Fatalf("second record = %+v", second)
+	}
+
+	if _, ok := cursor.next(); ok {
+		t.Fatal("cursor returned an unexpected third record")
+	}
+	if cursor.err != nil {
+		t.Fatalf("cursor error: %v", cursor.err)
+	}
+}
+
+func TestLogicalBlockCursorDoesNotAllocatePerRecord(t *testing.T) {
+	logical := makeLogicalBlock(t, []record.Record{
+		{Key: "apple", Seq: 3, Entry: record.Entry{Value: []byte("green")}},
+		{Key: "banana", Seq: 2, Entry: record.Entry{Value: []byte("yellow")}},
+		{Key: "carrot", Seq: 1, Entry: record.Entry{Value: []byte("orange")}},
+	})
+
+	var sequenceSum uint64
+	allocations := testing.AllocsPerRun(1000, func() {
+		cursor, err := newLogicalBlockCursor(logical)
+		if err != nil {
+			panic(err)
+		}
+
+		var sum uint64
+		for {
+			rec, ok := cursor.next()
+			if !ok {
+				break
+			}
+			sum += rec.Seq
+		}
+		if cursor.err != nil {
+			panic(cursor.err)
+		}
+		sequenceSum = sum
+	})
+
+	if sequenceSum != 6 {
+		t.Fatalf("sequence sum = %d, want 6", sequenceSum)
+	}
+	if allocations != 0 {
+		t.Fatalf("cursor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestLogicalBlockCursorRejectsCorruptRecord(t *testing.T) {
+	logical := makeLogicalBlock(t, []record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	})
+	logical[4+16] = 1 << 7
+
+	cursor, err := newLogicalBlockCursor(logical)
+	if err != nil {
+		t.Fatalf("newLogicalBlockCursor: %v", err)
+	}
+	if _, ok := cursor.next(); ok {
+		t.Fatal("cursor accepted a record with unknown flags")
+	}
+	requireErrorIs(t, cursor.err, ErrCorruptSSTable)
+}
+
+func TestLogicalBlockCursorRejectsTrailingBytes(t *testing.T) {
+	logical := makeLogicalBlock(t, []record.Record{
+		{Key: "apple", Seq: 1, Entry: record.Entry{Value: []byte("red")}},
+	})
+	logical = append(logical, 0xff)
+
+	cursor, err := newLogicalBlockCursor(logical)
+	if err != nil {
+		t.Fatalf("newLogicalBlockCursor: %v", err)
+	}
+	if _, ok := cursor.next(); !ok {
+		t.Fatalf("record missing: %v", cursor.err)
+	}
+	if _, ok := cursor.next(); ok {
+		t.Fatal("cursor returned a record from trailing bytes")
+	}
+	requireErrorIs(t, cursor.err, ErrCorruptSSTable)
+}
+
 func TestEncodePhysicalBlockUsesLZ4ForCompressibleData(t *testing.T) {
 	logical := bytes.Repeat([]byte("aaaaaaaaaaaaaaaa"), 4096)
 

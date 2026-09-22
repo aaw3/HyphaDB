@@ -146,18 +146,25 @@ func (s *SSTable) GetRecordAt(key string, maxSeq uint64) (record.Record, bool, e
 		if err != nil {
 			return record.Record{}, false, err
 		}
-		records, err := decodeLogicalBlock(logical)
+		cursor, err := newLogicalBlockCursor(logical)
 		if err != nil {
 			return record.Record{}, false, err
 		}
 
-		for _, rec := range records {
+		for {
+			rec, ok := cursor.next()
+			if !ok {
+				break
+			}
 			if rec.Key == key && rec.Seq <= maxSeq {
 				return rec, true, nil
 			}
 			if rec.Key > key {
 				return record.Record{}, false, nil
 			}
+		}
+		if cursor.err != nil {
+			return record.Record{}, false, cursor.err
 		}
 	}
 	return record.Record{}, false, nil
