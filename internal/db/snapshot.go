@@ -21,12 +21,7 @@ func (db *DB) NewSnapshot() (*Snapshot, error) {
 		return nil, ErrClosed
 	}
 
-	sequence, err := db.currentSequenceLocked()
-	if err != nil {
-		return nil, err
-	}
-
-	snapshot := &Snapshot{db: db, sequence: sequence}
+	snapshot := &Snapshot{db: db, sequence: db.currentSequenceLocked()}
 	db.registerReaderLocked(snapshot.sequence)
 	return snapshot, nil
 }

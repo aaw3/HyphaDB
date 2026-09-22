@@ -83,6 +83,7 @@ func TestIteratorMergesSourcesAndAppliesRange(t *testing.T) {
 			Value: []byte("brown"),
 		},
 	})
+	setTestCurrentSequence(database, 9)
 
 	it, err := database.NewIterator(IteratorOptions{
 		Start: "banana",
@@ -123,6 +124,7 @@ func TestIteratorRangeBoundsCanBeUnbounded(t *testing.T) {
 			},
 		})
 	}
+	setTestCurrentSequence(database, 4)
 
 	tests := []struct {
 		name string
@@ -191,6 +193,7 @@ func TestIteratorRangeSupportsPrefixScanBounds(t *testing.T) {
 			},
 		})
 	}
+	setTestCurrentSequence(database, 5)
 
 	it, err := database.NewIterator(IteratorOptions{
 		Start: "users\x00",
@@ -236,6 +239,7 @@ func TestScanPrefixUsesRangeBounds(t *testing.T) {
 			},
 		})
 	}
+	setTestCurrentSequence(database, 5)
 
 	it, err := database.ScanPrefix("users\x00")
 	if err != nil {
@@ -322,6 +326,7 @@ func TestIteratorSuppressesHighestSequenceTombstone(t *testing.T) {
 			MemTable: imm,
 		},
 	)
+	setTestCurrentSequence(database, 2)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -366,6 +371,7 @@ func TestIteratorSuppressesMemtableTombstoneOverSSTableValue(t *testing.T) {
 			Deleted: true,
 		},
 	})
+	setTestCurrentSequence(database, 10)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -402,6 +408,7 @@ func TestIteratorUsesNewerMemtableValueOverSSTableValue(t *testing.T) {
 	database.memtable.Put(record.Record{
 		Key: "apple", Seq: 10, Entry: record.Entry{Value: []byte("green")},
 	})
+	setTestCurrentSequence(database, 10)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -462,6 +469,7 @@ func TestIteratorCollapsesDuplicateKeysToHighestSequence(t *testing.T) {
 			Value: []byte("red-active"),
 		},
 	})
+	setTestCurrentSequence(database, 9)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -515,6 +523,7 @@ func TestIteratorMergesMultipleSSTablesGlobally(t *testing.T) {
 			Path: secondPath,
 		}),
 	)
+	setTestCurrentSequence(database, 4)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -566,6 +575,7 @@ func TestIteratorUsesSequenceOverSourceRecency(t *testing.T) {
 			Value: []byte("red-active"),
 		},
 	})
+	setTestCurrentSequence(database, 9)
 
 	it, err := database.NewIterator(IteratorOptions{})
 	if err != nil {
@@ -701,6 +711,10 @@ func TestIteratorActiveMemtableViewIsStableDuringConcurrentWrites(t *testing.T) 
 //	Helpers
 //
 // ----------
+func setTestCurrentSequence(database *DB, sequence uint64) {
+	database.nextSeq = sequence + 1
+}
+
 func collectIteratorKeyValues(t *testing.T, it *Iterator) []string {
 	t.Helper()
 

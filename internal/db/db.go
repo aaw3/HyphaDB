@@ -553,23 +553,12 @@ func hasCompactionWork(tables []manifest.SSTableMetadata, threshold int) bool {
 	return ok
 }
 
-// currentSequenceLocked returns the highest sequence currently represented by
-// the database. The caller must hold db.mu.
-func (db *DB) currentSequenceLocked() (uint64, error) {
-	maxSeq := db.nextSeq - 1
-
-	if seq := maxSeqFromMemTable(db.memtable); seq > maxSeq {
-		maxSeq = seq
-	}
-	seq, err := maxSeqFromSSTables(db.sstables)
-	if err != nil {
-		return 0, err
-	}
-	if seq > maxSeq {
-		maxSeq = seq
-	}
-
-	return maxSeq, nil
+// currentSequenceLocked returns the boundary before the next sequence that
+// may be allocated. Open initializes nextSeq from persisted state and every
+// successful mutation advances it while holding db.mu, so readers do not need
+// to rescan memtables or SSTables. The caller must hold db.mu.
+func (db *DB) currentSequenceLocked() uint64 {
+	return db.nextSeq - 1
 }
 
 func (db *DB) Put(key string, value []byte) error {

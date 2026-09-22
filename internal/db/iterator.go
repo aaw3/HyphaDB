@@ -78,11 +78,7 @@ func (db *DB) NewIterator(opts IteratorOptions) (*Iterator, error) {
 		return nil, err
 	}
 
-	maxSeq, err := db.currentSequenceLocked()
-	if err != nil {
-		return nil, err
-	}
-	return db.newIteratorLocked(opts, maxSeq)
+	return db.newIteratorLocked(opts, db.currentSequenceLocked())
 }
 
 func (db *DB) newIteratorLocked(opts IteratorOptions, maxSeq uint64) (*Iterator, error) {

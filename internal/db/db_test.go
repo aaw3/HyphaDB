@@ -188,6 +188,17 @@ func TestOpenUsesConfiguredDataDirectory(t *testing.T) {
 	if string(got) != "red" {
 		t.Fatalf("apple = %q, want red", got)
 	}
+
+	snapshot, err := reopened.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot after reopen: %v", err)
+	}
+	if got, want := snapshot.Sequence(), uint64(2); got != want {
+		t.Fatalf("snapshot sequence after reopen = %d, want %d", got, want)
+	}
+	if err := snapshot.Close(); err != nil {
+		t.Fatalf("close snapshot after reopen: %v", err)
+	}
 }
 
 func TestOpenAppliesDefaultTuningOptions(t *testing.T) {
@@ -251,6 +262,16 @@ func TestOpenAdvancesSequenceAndWALIDFromRecoveredSegments(t *testing.T) {
 	}
 	if _, ok := database.memtable.Get("incomplete"); ok {
 		t.Fatal("incomplete batch was recovered")
+	}
+	snapshot, err := database.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot after incomplete batch recovery: %v", err)
+	}
+	if got, want := snapshot.Sequence(), uint64(50); got != want {
+		t.Fatalf("snapshot sequence = %d, want %d", got, want)
+	}
+	if err := snapshot.Close(); err != nil {
+		t.Fatalf("close recovered snapshot: %v", err)
 	}
 
 	if err := database.Put("complete", []byte("value")); err != nil {

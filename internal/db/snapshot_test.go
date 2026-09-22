@@ -54,6 +54,19 @@ func TestSnapshotReadsPointInTime(t *testing.T) {
 	}
 }
 
+func TestCurrentSequenceUsesTrackedNextSequence(t *testing.T) {
+	database := &DB{
+		nextSeq: 42,
+		sstables: []*sstable.SSTable{
+			sstable.New("missing.sst", sstable.OpenOptions{}),
+		},
+	}
+
+	if got, want := database.currentSequenceLocked(), uint64(41); got != want {
+		t.Fatalf("current sequence = %d, want %d", got, want)
+	}
+}
+
 func TestMultipleSnapshotsUseIndependentSequences(t *testing.T) {
 	useTempWorkingDirectory(t)
 
