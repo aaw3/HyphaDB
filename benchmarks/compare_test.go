@@ -3,6 +3,7 @@ package benchmarks
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"os"
 	"runtime"
@@ -49,7 +50,7 @@ func TestEngineAdapters(t *testing.T) {
 				t.Fatalf("batch Commit: %v", err)
 			}
 
-			scanned, _, err := database.Scan(keys[0], benchmarkKey{
+			scanned, _, err := scanRange(database, keys[0], benchmarkKey{
 				text: "key/99999999999999999999",
 				raw:  []byte("key/99999999999999999999"),
 			})
@@ -111,6 +112,8 @@ func BenchmarkComparison(b *testing.B) {
 	b.Run("BatchOverwrite100CompactionDisabled", benchmarkBatchOverwriteCompactionDisabled)
 	b.Run("GetMemtable", benchmarkGetMemtable)
 	b.Run("GetPersistedWarm", benchmarkGetPersistedWarm)
+	b.Run("IteratorCreatePersistedWarm", benchmarkIteratorCreatePersistedWarm)
+	b.Run("IteratorTraversePersistedWarm100", benchmarkIteratorTraversePersistedWarm)
 	b.Run("ScanPersistedWarm100", benchmarkScanPersistedWarm)
 }
 
@@ -290,7 +293,6 @@ func benchmarkGetPersistedWarm(b *testing.B) {
 func benchmarkScanPersistedWarm(b *testing.B) {
 	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
 	keys := datasetKeys(records)
-	maxStart := len(keys) - scanSize
 
 	for _, engine := range engines {
 		b.Run(engine.name, func(b *testing.B) {
@@ -301,8 +303,8 @@ func benchmarkScanPersistedWarm(b *testing.B) {
 			b.SetBytes(scanSize * valueSize)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				start := (i * 97) % maxStart
-				records, bytesRead, err := database.Scan(keys[start], keys[start+scanSize])
+				start, end := scanBounds(keys, i)
+				records, bytesRead, err := scanRange(database, start, end)
 				if err != nil {
 					b.Fatalf("Scan: %v", err)
 				}
@@ -310,6 +312,83 @@ func benchmarkScanPersistedWarm(b *testing.B) {
 					b.Fatalf("Scan returned %d records, want %d", records, scanSize)
 				}
 				resultInt = bytesRead
+			}
+			reportRecords(b, scanSize)
+		})
+	}
+}
+
+func benchmarkIteratorCreatePersistedWarm(b *testing.B) {
+	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
+	keys := datasetKeys(records)
+
+	for _, engine := range engines {
+		b.Run(engine.name, func(b *testing.B) {
+			database := openPersistedBenchmarkDB(b, engine, records)
+			warmReads(b, database, shuffledKeys(keys, *benchmarkSeed))
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				start, end := scanBounds(keys, i)
+				iterator, err := database.NewIterator(start, end)
+				if err != nil {
+					b.Fatalf("NewIterator: %v", err)
+				}
+				if err := iterator.Prepare(); err != nil {
+					_ = iterator.Close()
+					b.Fatalf("prepare iterator: %v", err)
+				}
+				b.StopTimer()
+				if err := iterator.Close(); err != nil {
+					b.Fatalf("close iterator: %v", err)
+				}
+				b.StartTimer()
+			}
+		})
+	}
+}
+
+func benchmarkIteratorTraversePersistedWarm(b *testing.B) {
+	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
+	keys := datasetKeys(records)
+
+	for _, engine := range engines {
+		b.Run(engine.name, func(b *testing.B) {
+			database := openPersistedBenchmarkDB(b, engine, records)
+			warmReads(b, database, shuffledKeys(keys, *benchmarkSeed))
+
+			b.ReportAllocs()
+			b.SetBytes(scanSize * valueSize)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				start, end := scanBounds(keys, i)
+				iterator, err := database.NewIterator(start, end)
+				if err == nil {
+					err = iterator.Prepare()
+				}
+				if err != nil {
+					if iterator != nil {
+						_ = iterator.Close()
+					}
+					b.Fatalf("prepare iterator: %v", err)
+				}
+				b.StartTimer()
+
+				count, bytesRead := drainIterator(iterator)
+
+				b.StopTimer()
+				iteratorErr := iterator.Err()
+				closeErr := iterator.Close()
+				if err := errors.Join(iteratorErr, closeErr); err != nil {
+					b.Fatalf("iterate: %v", err)
+				}
+				if count != scanSize {
+					b.Fatalf("iterator returned %d records, want %d", count, scanSize)
+				}
+				resultInt = bytesRead
+				b.StartTimer()
 			}
 			reportRecords(b, scanSize)
 		})
@@ -377,6 +456,38 @@ func warmReads(b *testing.B, database benchmarkDB, keys []benchmarkKey) {
 	}
 	runtime.GC()
 	b.StartTimer()
+}
+
+func scanBounds(keys []benchmarkKey, operation int) (benchmarkKey, benchmarkKey) {
+	maxStart := len(keys) - scanSize
+	start := (operation * 97) % maxStart
+	return keys[start], keys[start+scanSize]
+}
+
+func scanRange(
+	database benchmarkDB,
+	start benchmarkKey,
+	end benchmarkKey,
+) (int, int, error) {
+	iterator, err := database.NewIterator(start, end)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := iterator.Prepare(); err != nil {
+		return 0, 0, errors.Join(err, iterator.Close())
+	}
+	records, bytesRead := drainIterator(iterator)
+	return records, bytesRead, errors.Join(iterator.Err(), iterator.Close())
+}
+
+func drainIterator(iterator benchmarkIterator) (int, int) {
+	records := 0
+	bytesRead := 0
+	for iterator.Next() {
+		bytesRead += iterator.Bytes()
+		records++
+	}
+	return records, bytesRead
 }
 
 func reportRecords(b *testing.B, recordsPerOperation int) {

@@ -44,8 +44,20 @@ calibration:
 
 ```sh
 go test -run '^$' \
-  -bench '^BenchmarkComparison$/^(GetMemtable|GetPersistedWarm|ScanPersistedWarm100)$' \
+  -bench '^BenchmarkComparison$/^(GetMemtable|GetPersistedWarm)$' \
   -benchmem -benchtime=3s -count=5 \
+  -args -storage-root="$PWD/.benchmark-data"
+```
+
+Iterator benchmarks separate ready-iterator creation, traversal with setup
+excluded, and end-to-end open/scan/close. Use a fixed count because excluded
+setup time can otherwise cause Go to calibrate traversal to an impractically
+large `b.N`:
+
+```sh
+go test -run '^$' \
+  -bench '^BenchmarkComparison$/^(IteratorCreatePersistedWarm|IteratorTraversePersistedWarm100|ScanPersistedWarm100)$' \
+  -benchmem -benchtime=100x -count=5 \
   -args -storage-root="$PWD/.benchmark-data"
 ```
 

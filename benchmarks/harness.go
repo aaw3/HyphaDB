@@ -26,13 +26,21 @@ type benchmarkDB interface {
 	Put(benchmarkKey, []byte) error
 	Get(benchmarkKey) ([]byte, bool, error)
 	NewBatch() benchmarkBatch
-	Scan(start, end benchmarkKey) (records int, bytes int, err error)
+	NewIterator(start, end benchmarkKey) (benchmarkIterator, error)
 	Close() error
 }
 
 type benchmarkBatch interface {
 	Put(benchmarkKey, []byte) error
 	Commit(sync bool) error
+}
+
+type benchmarkIterator interface {
+	Prepare() error
+	Next() bool
+	Bytes() int
+	Err() error
+	Close() error
 }
 
 type engineFactory struct {
@@ -134,27 +142,18 @@ func (db *hyphaDatabase) NewBatch() benchmarkBatch {
 	return &hyphaBatch{batch: db.db.NewBatch()}
 }
 
-func (db *hyphaDatabase) Scan(
+func (db *hyphaDatabase) NewIterator(
 	start benchmarkKey,
 	end benchmarkKey,
-) (int, int, error) {
+) (benchmarkIterator, error) {
 	iterator, err := db.db.NewIterator(hyphadb.IteratorOptions{
 		Start: start.text,
 		End:   end.text,
 	})
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-
-	records := 0
-	bytesRead := 0
-	for iterator.Next() {
-		bytesRead += len(iterator.Key()) + len(iterator.Value())
-		records++
-	}
-	iteratorErr := iterator.Err()
-	closeErr := iterator.Close()
-	return records, bytesRead, errors.Join(iteratorErr, closeErr)
+	return &hyphaIterator{iterator: iterator}, nil
 }
 
 func (db *hyphaDatabase) Close() error {
@@ -163,6 +162,36 @@ func (db *hyphaDatabase) Close() error {
 
 type hyphaBatch struct {
 	batch *hyphadb.Batch
+}
+
+type hyphaIterator struct {
+	iterator *hyphadb.Iterator
+	bytes    int
+}
+
+func (*hyphaIterator) Prepare() error {
+	// HyphaDB eagerly seeks and primes its sources in NewIterator.
+	return nil
+}
+
+func (iterator *hyphaIterator) Next() bool {
+	if !iterator.iterator.Next() {
+		return false
+	}
+	iterator.bytes = len(iterator.iterator.Key()) + len(iterator.iterator.Value())
+	return true
+}
+
+func (iterator *hyphaIterator) Bytes() int {
+	return iterator.bytes
+}
+
+func (iterator *hyphaIterator) Err() error {
+	return iterator.iterator.Err()
+}
+
+func (iterator *hyphaIterator) Close() error {
+	return iterator.iterator.Close()
 }
 
 func (batch *hyphaBatch) Put(key benchmarkKey, value []byte) error {
@@ -259,33 +288,18 @@ func (db *pebbleDatabase) NewBatch() benchmarkBatch {
 	return &pebbleBatch{batch: db.db.NewBatch()}
 }
 
-func (db *pebbleDatabase) Scan(
+func (db *pebbleDatabase) NewIterator(
 	start benchmarkKey,
 	end benchmarkKey,
-) (int, int, error) {
+) (benchmarkIterator, error) {
 	iterator, err := db.db.NewIter(&pebble.IterOptions{
 		LowerBound: start.raw,
 		UpperBound: end.raw,
 	})
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-
-	records := 0
-	bytesRead := 0
-	for valid := iterator.First(); valid; valid = iterator.Next() {
-		value, valueErr := iterator.ValueAndErr()
-		if valueErr != nil {
-			_ = iterator.Close()
-			return 0, 0, valueErr
-		}
-		owned := append([]byte(nil), value...)
-		bytesRead += len(iterator.Key()) + len(owned)
-		records++
-	}
-	iteratorErr := iterator.Error()
-	closeErr := iterator.Close()
-	return records, bytesRead, errors.Join(iteratorErr, closeErr)
+	return &pebbleIterator{iterator: iterator}, nil
 }
 
 func (db *pebbleDatabase) Close() error {
@@ -294,6 +308,67 @@ func (db *pebbleDatabase) Close() error {
 
 type pebbleBatch struct {
 	batch *pebble.Batch
+}
+
+type pebbleIterator struct {
+	iterator *pebble.Iterator
+	prepared bool
+	first    bool
+	valid    bool
+	bytes    int
+	err      error
+}
+
+func (iterator *pebbleIterator) Prepare() error {
+	if iterator.prepared {
+		return iterator.err
+	}
+	iterator.prepared = true
+	iterator.first = true
+	iterator.valid = iterator.iterator.First()
+	if err := iterator.iterator.Error(); err != nil {
+		iterator.err = err
+	}
+	return iterator.err
+}
+
+func (iterator *pebbleIterator) Next() bool {
+	if iterator.err != nil {
+		return false
+	}
+	if !iterator.prepared {
+		if err := iterator.Prepare(); err != nil {
+			return false
+		}
+	}
+	if iterator.first {
+		iterator.first = false
+	} else {
+		iterator.valid = iterator.iterator.Next()
+	}
+	if !iterator.valid {
+		return false
+	}
+	value, err := iterator.iterator.ValueAndErr()
+	if err != nil {
+		iterator.err = err
+		return false
+	}
+	owned := append([]byte(nil), value...)
+	iterator.bytes = len(iterator.iterator.Key()) + len(owned)
+	return true
+}
+
+func (iterator *pebbleIterator) Bytes() int {
+	return iterator.bytes
+}
+
+func (iterator *pebbleIterator) Err() error {
+	return errors.Join(iterator.err, iterator.iterator.Error())
+}
+
+func (iterator *pebbleIterator) Close() error {
+	return iterator.iterator.Close()
 }
 
 func (batch *pebbleBatch) Put(key benchmarkKey, value []byte) error {
