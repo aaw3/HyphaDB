@@ -14,7 +14,12 @@ const (
 	benchmarkValueSize   = 128
 	benchmarkScanSize    = 100
 	benchmarkBatchSize   = 100
+	benchmarkTableCount  = 8
+	benchmarkValueMatrix = 2_048
 )
+
+var benchmarkScanSizes = []int{10, 100, 1000}
+var benchmarkValueSizes = []int{128, 1024, 16 * 1024}
 
 var (
 	benchmarkBytes  []byte
@@ -180,6 +185,118 @@ func BenchmarkGetSSTableWarm(b *testing.B) {
 			}
 		}
 	})
+
+	b.Run("OutOfRangeMiss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := database.Get("zzzz/out-of-range"); !errors.Is(err, hyphadb.ErrNotFound) {
+				b.Fatalf("Get out-of-range key: %v", err)
+			}
+		}
+	})
+
+	b.Run("ParallelHit", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(value)))
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			index := 0
+			var got []byte
+			for pb.Next() {
+				var err error
+				got, err = database.Get(readKeys[index%len(readKeys)])
+				if err != nil {
+					b.Errorf("Get: %v", err)
+					return
+				}
+				index++
+			}
+			runtime.KeepAlive(got)
+		})
+	})
+}
+
+func BenchmarkGetSSTableWarmMultiTable(b *testing.B) {
+	database, keys, value := openSSTableBenchmarkDBWithOptions(
+		b,
+		benchmarkDatasetSize,
+		benchmarkValueSize,
+		benchmarkTableCount,
+	)
+	recordsPerTable := len(keys) / benchmarkTableCount
+	lowKeys := benchmarkShuffledKeys(keys[:recordsPerTable])
+	highKeys := benchmarkShuffledKeys(keys[len(keys)-recordsPerTable:])
+	missingKeys := benchmarkShuffledKeys(benchmarkMissingKeys(keys))
+	warmBenchmarkReads(b, database, benchmarkShuffledKeys(keys))
+
+	for _, readCase := range []struct {
+		name string
+		keys []string
+	}{
+		{name: "LowRangeHit", keys: lowKeys},
+		{name: "HighRangeHit", keys: highKeys},
+	} {
+		b.Run(readCase.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(value)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				got, err := database.Get(readCase.keys[i%len(readCase.keys)])
+				if err != nil {
+					b.Fatalf("Get: %v", err)
+				}
+				benchmarkBytes = got
+			}
+		})
+	}
+
+	b.Run("InRangeBloomMiss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			key := missingKeys[i%len(missingKeys)]
+			if _, err := database.Get(key); !errors.Is(err, hyphadb.ErrNotFound) {
+				b.Fatalf("Get missing key: %v", err)
+			}
+		}
+	})
+
+	b.Run("OutOfRangeMiss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := database.Get("zzzz/out-of-range"); !errors.Is(err, hyphadb.ErrNotFound) {
+				b.Fatalf("Get out-of-range key: %v", err)
+			}
+		}
+	})
+}
+
+func BenchmarkGetSSTableWarmValueSizes(b *testing.B) {
+	for _, size := range benchmarkValueSizes {
+		b.Run(fmt.Sprintf("Value%dB", size), func(b *testing.B) {
+			database, keys, value := openSSTableBenchmarkDBWithOptions(
+				b,
+				benchmarkValueMatrix,
+				size,
+				1,
+			)
+			readKeys := benchmarkShuffledKeys(keys)
+			warmBenchmarkReads(b, database, readKeys)
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(value)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				got, err := database.Get(readKeys[i%len(readKeys)])
+				if err != nil {
+					b.Fatalf("Get: %v", err)
+				}
+				benchmarkBytes = got
+			}
+		})
+	}
 }
 
 func BenchmarkScanSSTableWarm100(b *testing.B) {
@@ -224,16 +341,143 @@ func BenchmarkScanSSTableWarm100(b *testing.B) {
 	)
 }
 
-func openSSTableBenchmarkDB(b *testing.B) (*hyphadb.DB, []string, []byte) {
+func BenchmarkScanSSTableWarmSizes(b *testing.B) {
+	database, keys, value := openSSTableBenchmarkDB(b)
+	warmBenchmarkReads(b, database, benchmarkShuffledKeys(keys))
+
+	for _, size := range benchmarkScanSizes {
+		b.Run(fmt.Sprintf("Records%d", size), func(b *testing.B) {
+			benchmarkScan(b, database, keys, value, size)
+		})
+	}
+}
+
+func BenchmarkScanSSTableWarmMultiTable100(b *testing.B) {
+	database, keys, value := openSSTableBenchmarkDBWithOptions(
+		b,
+		benchmarkDatasetSize,
+		benchmarkValueSize,
+		benchmarkTableCount,
+	)
+	warmBenchmarkReads(b, database, benchmarkShuffledKeys(keys))
+	benchmarkScan(b, database, keys, value, benchmarkScanSize)
+}
+
+func benchmarkScan(
+	b *testing.B,
+	database *hyphadb.DB,
+	keys []string,
+	value []byte,
+	size int,
+) {
 	b.Helper()
+	maxStart := len(keys) - size
+	b.ReportAllocs()
+	b.SetBytes(int64(size * len(value)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		start := (i * 97) % maxStart
+		iterator, err := database.NewIterator(hyphadb.IteratorOptions{
+			Start: keys[start],
+			End:   keys[start+size],
+		})
+		if err != nil {
+			b.Fatalf("NewIterator: %v", err)
+		}
+
+		count := 0
+		for iterator.Next() {
+			benchmarkKey = iterator.Key()
+			benchmarkBytes = iterator.Value()
+			count++
+		}
+		if err := errors.Join(iterator.Err(), iterator.Close()); err != nil {
+			b.Fatalf("iterator: %v", err)
+		}
+		if count != size {
+			b.Fatalf("scan returned %d records, want %d", count, size)
+		}
+		benchmarkRecord = count
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(size), "records/op")
+	b.ReportMetric(float64(b.N*size), "total-records")
+	b.ReportMetric(float64(b.N*size)/b.Elapsed().Seconds(), "records/s")
+}
+
+func BenchmarkCompactL0ToL1(b *testing.B) {
+	benchmarkCompaction(b, false)
+}
+
+func BenchmarkCompactL1ToL2(b *testing.B) {
+	benchmarkCompaction(b, true)
+}
+
+func benchmarkCompaction(b *testing.B, prepareL1 bool) {
+	const recordCount = 4_000
+	keys := benchmarkKeys(recordCount)
+	value := benchmarkValue(benchmarkValueSize)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(recordCount * len(value)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		database := prepareCompactionBenchmarkDB(b, keys, value)
+		if prepareL1 {
+			if err := database.Compact(); err != nil {
+				b.Fatalf("prepare L1: %v", err)
+			}
+		}
+		b.StartTimer()
+
+		if err := database.Compact(); err != nil {
+			b.Fatalf("Compact: %v", err)
+		}
+
+		b.StopTimer()
+		if err := database.Close(); err != nil {
+			b.Fatalf("Close: %v", err)
+		}
+		b.StartTimer()
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(recordCount), "records/op")
+	b.ReportMetric(float64(b.N*recordCount), "total-records")
+	b.ReportMetric(float64(b.N*recordCount)/b.Elapsed().Seconds(), "records/s")
+}
+
+func openSSTableBenchmarkDB(b *testing.B) (*hyphadb.DB, []string, []byte) {
+	return openSSTableBenchmarkDBWithOptions(
+		b,
+		benchmarkDatasetSize,
+		benchmarkValueSize,
+		1,
+	)
+}
+
+func openSSTableBenchmarkDBWithOptions(
+	b *testing.B,
+	recordCount int,
+	valueSize int,
+	tableCount int,
+) (*hyphadb.DB, []string, []byte) {
+	b.Helper()
+	if tableCount <= 0 || recordCount%tableCount != 0 {
+		b.Fatalf(
+			"record count %d is not divisible by table count %d",
+			recordCount,
+			tableCount,
+		)
+	}
 
 	dataDir := b.TempDir()
-	keys := benchmarkKeys(benchmarkDatasetSize)
-	value := benchmarkValue(benchmarkValueSize)
+	keys := benchmarkKeys(recordCount)
+	value := benchmarkValue(valueSize)
 	options := hyphadb.Options{
 		DataDir: dataDir,
 		Memtable: hyphadb.MemtableOptions{
-			MaxEntries: benchmarkDatasetSize,
+			MaxEntries: recordCount / tableCount,
 		},
 		Compaction: hyphadb.CompactionOptions{
 			TableCountThreshold: maxInt(),
@@ -249,6 +493,45 @@ func openSSTableBenchmarkDB(b *testing.B) (*hyphadb.DB, []string, []byte) {
 	options.Memtable.MaxEntries = maxInt()
 	database = openBenchmarkDB(b, options)
 	return database, keys, value
+}
+
+func prepareCompactionBenchmarkDB(
+	b *testing.B,
+	keys []string,
+	value []byte,
+) *hyphadb.DB {
+	b.Helper()
+	dataDir := b.TempDir()
+	options := hyphadb.Options{
+		DataDir: dataDir,
+		Memtable: hyphadb.MemtableOptions{
+			MaxEntries: len(keys) / 4,
+		},
+		Compaction: hyphadb.CompactionOptions{
+			TableCountThreshold: maxInt(),
+		},
+	}
+
+	database, err := hyphadb.Open(options)
+	if err != nil {
+		b.Fatalf("Open compaction fixture: %v", err)
+	}
+	for _, key := range keys {
+		if err := database.Put(key, value); err != nil {
+			_ = database.Close()
+			b.Fatalf("load compaction fixture: %v", err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		b.Fatalf("close compaction fixture: %v", err)
+	}
+
+	options.Memtable.MaxEntries = maxInt()
+	database, err = hyphadb.Open(options)
+	if err != nil {
+		b.Fatalf("reopen compaction fixture: %v", err)
+	}
+	return database
 }
 
 func openBenchmarkDB(b *testing.B, options hyphadb.Options) *hyphadb.DB {

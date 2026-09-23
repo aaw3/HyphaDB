@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"runtime"
 	"testing"
@@ -72,6 +73,24 @@ func TestEngineAdapters(t *testing.T) {
 			if err := persisted.Close(); err != nil {
 				t.Fatalf("close persisted fixture: %v", err)
 			}
+
+			multi, err := engine.openPersistedTables(
+				t.TempDir(),
+				makeDataset(8, 16, defaultBenchmarkSeed),
+				4,
+			)
+			if err != nil {
+				t.Fatalf("open multi-table fixture: %v", err)
+			}
+			if _, found, err := multi.Get(benchmarkKey{
+				text: "key/00000000000000000006",
+				raw:  []byte("key/00000000000000000006"),
+			}); err != nil || !found {
+				t.Fatalf("multi-table Get found=%t, err=%v", found, err)
+			}
+			if err := multi.Close(); err != nil {
+				t.Fatalf("close multi-table fixture: %v", err)
+			}
 		})
 	}
 }
@@ -112,9 +131,13 @@ func BenchmarkComparison(b *testing.B) {
 	b.Run("BatchOverwrite100CompactionDisabled", benchmarkBatchOverwriteCompactionDisabled)
 	b.Run("GetMemtable", benchmarkGetMemtable)
 	b.Run("GetPersistedWarm", benchmarkGetPersistedWarm)
+	b.Run("GetPersistedWarmMultiTable", benchmarkGetPersistedWarmMultiTable)
+	b.Run("GetPersistedWarmValueSizes", benchmarkGetPersistedWarmValueSizes)
 	b.Run("IteratorCreatePersistedWarm", benchmarkIteratorCreatePersistedWarm)
 	b.Run("IteratorTraversePersistedWarm100", benchmarkIteratorTraversePersistedWarm)
 	b.Run("ScanPersistedWarm100", benchmarkScanPersistedWarm)
+	b.Run("ScanPersistedWarmSizes", benchmarkScanPersistedWarmSizes)
+	b.Run("ScanPersistedWarmMultiTable100", benchmarkScanPersistedWarmMultiTable)
 }
 
 func benchmarkPutSequentialCompactionDisabled(b *testing.B) {
@@ -286,6 +309,161 @@ func benchmarkGetPersistedWarm(b *testing.B) {
 					}
 				}
 			})
+
+			b.Run("OutOfRangeMiss", func(b *testing.B) {
+				missing := benchmarkKey{
+					text: "zzzz/out-of-range",
+					raw:  []byte("zzzz/out-of-range"),
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, found, err := database.Get(missing); err != nil || found {
+						b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
+					}
+				}
+			})
+
+			b.Run("ParallelHit", func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(valueSize)
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					index := 0
+					var got []byte
+					for pb.Next() {
+						var found bool
+						var err error
+						got, found, err = database.Get(readKeys[index%len(readKeys)])
+						if err != nil || !found {
+							b.Errorf("parallel Get found=%t, err=%v", found, err)
+							return
+						}
+						index++
+					}
+					runtime.KeepAlive(got)
+				})
+			})
+		})
+	}
+}
+
+func benchmarkGetPersistedWarmMultiTable(b *testing.B) {
+	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
+	keys := datasetKeys(records)
+	recordsPerTable := len(records) / multiTableCount
+	lowKeys := shuffledKeys(keys[:recordsPerTable], *benchmarkSeed)
+	highKeys := shuffledKeys(keys[len(keys)-recordsPerTable:], *benchmarkSeed)
+	misses := shuffledKeys(missingKeys(keys), *benchmarkSeed)
+	outOfRange := benchmarkKey{
+		text: "zzzz/out-of-range",
+		raw:  []byte("zzzz/out-of-range"),
+	}
+
+	for _, engine := range engines {
+		b.Run(engine.name, func(b *testing.B) {
+			database := openPersistedTablesBenchmarkDB(
+				b,
+				engine,
+				records,
+				multiTableCount,
+			)
+			warmReads(b, database, shuffledKeys(keys, *benchmarkSeed))
+
+			for _, readCase := range []struct {
+				name string
+				keys []benchmarkKey
+			}{
+				{name: "LowRangeHit", keys: lowKeys},
+				{name: "HighRangeHit", keys: highKeys},
+			} {
+				b.Run(readCase.name, func(b *testing.B) {
+					b.ReportAllocs()
+					b.SetBytes(valueSize)
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						got, found, err := database.Get(readCase.keys[i%len(readCase.keys)])
+						if err != nil || !found {
+							b.Fatalf("Get found=%t, err=%v", found, err)
+						}
+						resultBytes = got
+					}
+					reportRecords(b, 1)
+				})
+			}
+
+			b.Run("InRangeBloomMiss", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, found, err := database.Get(misses[i%len(misses)]); err != nil || found {
+						b.Fatalf("Get missing found=%t, err=%v", found, err)
+					}
+				}
+				reportRecords(b, 1)
+			})
+
+			b.Run("OutOfRangeMiss", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if _, found, err := database.Get(outOfRange); err != nil || found {
+						b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
+					}
+				}
+				reportRecords(b, 1)
+			})
+
+			b.Run("ParallelHit", func(b *testing.B) {
+				readKeys := shuffledKeys(keys, *benchmarkSeed)
+				b.ReportAllocs()
+				b.SetBytes(valueSize)
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					index := 0
+					var got []byte
+					for pb.Next() {
+						var found bool
+						var err error
+						got, found, err = database.Get(readKeys[index%len(readKeys)])
+						if err != nil || !found {
+							b.Errorf("parallel Get found=%t, err=%v", found, err)
+							return
+						}
+						index++
+					}
+					runtime.KeepAlive(got)
+				})
+				reportRecords(b, 1)
+			})
+		})
+	}
+}
+
+func benchmarkGetPersistedWarmValueSizes(b *testing.B) {
+	for _, size := range extendedValueSizes {
+		b.Run(fmt.Sprintf("Value%dB", size), func(b *testing.B) {
+			records := makeDataset(valueMatrixSize, size, *benchmarkSeed)
+			keys := shuffledKeys(datasetKeys(records), *benchmarkSeed)
+
+			for _, engine := range engines {
+				b.Run(engine.name, func(b *testing.B) {
+					database := openPersistedBenchmarkDB(b, engine, records)
+					warmReads(b, database, keys)
+
+					b.ReportAllocs()
+					b.SetBytes(int64(size))
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						got, found, err := database.Get(keys[i%len(keys)])
+						if err != nil || !found {
+							b.Fatalf("Get found=%t, err=%v", found, err)
+						}
+						resultBytes = got
+					}
+					reportRecords(b, 1)
+				})
+			}
 		})
 	}
 }
@@ -310,6 +488,71 @@ func benchmarkScanPersistedWarm(b *testing.B) {
 				}
 				if records != scanSize {
 					b.Fatalf("Scan returned %d records, want %d", records, scanSize)
+				}
+				resultInt = bytesRead
+			}
+			reportRecords(b, scanSize)
+		})
+	}
+}
+
+func benchmarkScanPersistedWarmSizes(b *testing.B) {
+	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
+	keys := datasetKeys(records)
+
+	for _, size := range extendedScanSizes {
+		b.Run(fmt.Sprintf("Records%d", size), func(b *testing.B) {
+			for _, engine := range engines {
+				b.Run(engine.name, func(b *testing.B) {
+					database := openPersistedBenchmarkDB(b, engine, records)
+					warmReads(b, database, shuffledKeys(keys, *benchmarkSeed))
+
+					b.ReportAllocs()
+					b.SetBytes(int64(size * valueSize))
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						start, end := scanBoundsForSize(keys, i, size)
+						count, bytesRead, err := scanRange(database, start, end)
+						if err != nil {
+							b.Fatalf("Scan: %v", err)
+						}
+						if count != size {
+							b.Fatalf("Scan returned %d records, want %d", count, size)
+						}
+						resultInt = bytesRead
+					}
+					reportRecords(b, size)
+				})
+			}
+		})
+	}
+}
+
+func benchmarkScanPersistedWarmMultiTable(b *testing.B) {
+	records := makeDataset(datasetSize, valueSize, *benchmarkSeed)
+	keys := datasetKeys(records)
+
+	for _, engine := range engines {
+		b.Run(engine.name, func(b *testing.B) {
+			database := openPersistedTablesBenchmarkDB(
+				b,
+				engine,
+				records,
+				multiTableCount,
+			)
+			warmReads(b, database, shuffledKeys(keys, *benchmarkSeed))
+
+			b.ReportAllocs()
+			b.SetBytes(scanSize * valueSize)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				start, end := scanBoundsForSize(keys, i, scanSize)
+				count, bytesRead, err := scanRange(database, start, end)
+				if err != nil {
+					b.Fatalf("Scan: %v", err)
+				}
+				if count != scanSize {
+					b.Fatalf("Scan returned %d records, want %d", count, scanSize)
 				}
 				resultInt = bytesRead
 			}
@@ -431,6 +674,31 @@ func openPersistedBenchmarkDB(
 	return database
 }
 
+func openPersistedTablesBenchmarkDB(
+	b *testing.B,
+	engine engineFactory,
+	records []benchmarkRecord,
+	tableCount int,
+) benchmarkDB {
+	b.Helper()
+	b.StopTimer()
+	database, err := engine.openPersistedTables(
+		benchmarkDataDir(b, engine.name),
+		records,
+		tableCount,
+	)
+	if err != nil {
+		b.Fatalf("open persisted %s multi-table fixture: %v", engine.name, err)
+	}
+	b.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			b.Errorf("close %s: %v", engine.name, err)
+		}
+	})
+	b.StartTimer()
+	return database
+}
+
 func loadRecords(
 	b *testing.B,
 	database benchmarkDB,
@@ -459,9 +727,17 @@ func warmReads(b *testing.B, database benchmarkDB, keys []benchmarkKey) {
 }
 
 func scanBounds(keys []benchmarkKey, operation int) (benchmarkKey, benchmarkKey) {
-	maxStart := len(keys) - scanSize
+	return scanBoundsForSize(keys, operation, scanSize)
+}
+
+func scanBoundsForSize(
+	keys []benchmarkKey,
+	operation int,
+	size int,
+) (benchmarkKey, benchmarkKey) {
+	maxStart := len(keys) - size
 	start := (operation * 97) % maxStart
-	return keys[start], keys[start+scanSize]
+	return keys[start], keys[start+size]
 }
 
 func scanRange(

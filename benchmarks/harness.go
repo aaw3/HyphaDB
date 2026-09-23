@@ -10,12 +10,17 @@ import (
 )
 
 const (
-	datasetSize = 10_000
-	valueSize   = 128
-	batchSize   = 100
-	scanSize    = 100
-	cacheSize   = 64 * 1024 * 1024
+	datasetSize     = 10_000
+	valueSize       = 128
+	valueMatrixSize = 2_048
+	batchSize       = 100
+	scanSize        = 100
+	multiTableCount = 8
+	cacheSize       = 64 * 1024 * 1024
 )
+
+var extendedValueSizes = []int{128, 1024, 16 * 1024}
+var extendedScanSizes = []int{10, 100, 1000}
 
 type benchmarkKey struct {
 	text string
@@ -47,6 +52,7 @@ type engineFactory struct {
 	name                   string
 	openCompactionDisabled func(string) (benchmarkDB, error)
 	openPersisted          func(string, []benchmarkRecord) (benchmarkDB, error)
+	openPersistedTables    func(string, []benchmarkRecord, int) (benchmarkDB, error)
 }
 
 var engines = []engineFactory{
@@ -54,11 +60,13 @@ var engines = []engineFactory{
 		name:                   "HyphaDB",
 		openCompactionDisabled: openHyphaCompactionDisabled,
 		openPersisted:          openHyphaPersisted,
+		openPersistedTables:    openHyphaPersistedTables,
 	},
 	{
 		name:                   "Pebble",
 		openCompactionDisabled: openPebbleCompactionDisabled,
 		openPersisted:          openPebblePersisted,
+		openPersistedTables:    openPebblePersistedTables,
 	},
 }
 
@@ -89,10 +97,26 @@ func openHyphaPersisted(
 	dir string,
 	records []benchmarkRecord,
 ) (benchmarkDB, error) {
+	return openHyphaPersistedTables(dir, records, 1)
+}
+
+func openHyphaPersistedTables(
+	dir string,
+	records []benchmarkRecord,
+	tableCount int,
+) (benchmarkDB, error) {
+	if tableCount <= 0 || len(records)%tableCount != 0 {
+		return nil, fmt.Errorf(
+			"record count %d is not divisible by table count %d",
+			len(records),
+			tableCount,
+		)
+	}
+	recordsPerTable := len(records) / tableCount
 	options := hyphadb.Options{
 		DataDir: dir,
 		Memtable: hyphadb.MemtableOptions{
-			MaxEntries: len(records),
+			MaxEntries: recordsPerTable,
 		},
 		Compaction: hyphadb.CompactionOptions{
 			TableCountThreshold: maxInt(),
@@ -240,19 +264,37 @@ func openPebblePersisted(
 	dir string,
 	records []benchmarkRecord,
 ) (benchmarkDB, error) {
+	return openPebblePersistedTables(dir, records, 1)
+}
+
+func openPebblePersistedTables(
+	dir string,
+	records []benchmarkRecord,
+	tableCount int,
+) (benchmarkDB, error) {
+	if tableCount <= 0 || len(records)%tableCount != 0 {
+		return nil, fmt.Errorf(
+			"record count %d is not divisible by table count %d",
+			len(records),
+			tableCount,
+		)
+	}
+	recordsPerTable := len(records) / tableCount
 	db, err := pebble.Open(dir, pebbleOptions())
 	if err != nil {
 		return nil, err
 	}
-	for _, record := range records {
+	for index, record := range records {
 		if err := db.Set(record.key.raw, record.value, pebble.NoSync); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
-	}
-	if err := db.Flush(); err != nil {
-		_ = db.Close()
-		return nil, err
+		if (index+1)%recordsPerTable == 0 {
+			if err := db.Flush(); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 	if err := db.Close(); err != nil {
 		return nil, err

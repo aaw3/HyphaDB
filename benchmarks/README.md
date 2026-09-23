@@ -61,6 +61,26 @@ go test -run '^$' \
   -args -storage-root="$PWD/.benchmark-data"
 ```
 
+The extended read suite adds eight-table persisted fixtures, parallel reads,
+value sizes of 128 B, 1 KiB, and 16 KiB, scans of 10, 100, and 1,000 records,
+and a 100-record scan across multiple tables:
+
+```sh
+go test -run '^$' \
+  -bench '^BenchmarkComparison$/^(GetPersistedWarm|GetPersistedWarmMultiTable|GetPersistedWarmValueSizes|ScanPersistedWarmSizes|ScanPersistedWarmMultiTable100)$' \
+  -benchmem -benchtime=1000x -count=5 \
+  -args -storage-root="$PWD/.benchmark-data"
+```
+
+The original persisted-read workload now also distinguishes an in-range miss,
+an out-of-range miss, and parallel hits. Its `Miss` case remains the historical
+in-range Bloom-filter path.
+
+HyphaDB's native benchmark suite additionally contains direct Bloom-filter
+checks and isolated L0-to-L1 and L1-to-L2 compaction benchmarks. Compaction
+fixture construction is excluded from timing; the reported allocation and
+throughput metrics cover `Compact` itself.
+
 Redirect a controlled command's output to a file to collect input for
 `benchstat`, for example by appending `> baseline.txt`.
 
@@ -88,6 +108,10 @@ removed after each benchmark. The supplied root itself is retained.
 - Both engines use a 64 MiB block cache.
 - Persisted-read fixtures contain the same 10,000 records and are explicitly
   warmed before timing.
+- Multi-table fixtures contain eight logical flush runs with 1,250 records
+  each. Automatic compaction is disabled so the fixture remains stable.
+- Value-size fixtures contain 2,048 records so the 16 KiB case remains well
+  below the 64 MiB block-cache budget after key and block-format overhead.
 - Pebble point and iterator values are copied before their borrowed storage is
   released, matching HyphaDB's owned-value public API.
 - Database creation, fixture loading, key generation, cache warming, closing,
