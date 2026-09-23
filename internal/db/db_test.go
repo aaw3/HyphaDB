@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -213,6 +214,50 @@ func TestOpenAppliesDefaultTuningOptions(t *testing.T) {
 	}
 	if database.compactionThreshold != defaultCompactionThreshold {
 		t.Fatalf("compaction threshold = %d, want %d", database.compactionThreshold, defaultCompactionThreshold)
+	}
+	if !database.sstableWriteOptions.Bloom.Enabled {
+		t.Fatal("default SSTable Bloom filter is disabled")
+	}
+	if got, want := database.sstableWriteOptions.Bloom.FalsePositiveRate,
+		sstable.DefaultFalsePositiveRate; got != want {
+		t.Fatalf("Bloom false-positive rate = %f, want %f", got, want)
+	}
+}
+
+func TestOpenAppliesBloomFilterOptions(t *testing.T) {
+	database, err := Open(Options{
+		DataDir: t.TempDir(),
+		SSTable: SSTableOptions{
+			BloomFilter: BloomFilterOptions{
+				Disabled:          true,
+				FalsePositiveRate: 0.02,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	if database.sstableWriteOptions.Bloom.Enabled {
+		t.Fatal("SSTable Bloom filter is enabled")
+	}
+	if got, want := database.sstableWriteOptions.Bloom.FalsePositiveRate, 0.02; got != want {
+		t.Fatalf("Bloom false-positive rate = %f, want %f", got, want)
+	}
+}
+
+func TestOpenRejectsInvalidBloomFalsePositiveRate(t *testing.T) {
+	for _, rate := range []float64{-0.01, 1, 1.01, math.NaN()} {
+		_, err := Open(Options{
+			DataDir: t.TempDir(),
+			SSTable: SSTableOptions{
+				BloomFilter: BloomFilterOptions{FalsePositiveRate: rate},
+			},
+		})
+		if err == nil {
+			t.Fatalf("Open accepted false-positive rate %f", rate)
+		}
 	}
 }
 

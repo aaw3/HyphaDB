@@ -72,9 +72,16 @@ go test -run '^$' \
   -args -storage-root="$PWD/.benchmark-data"
 ```
 
-The original persisted-read workload now also distinguishes an in-range miss,
-an out-of-range miss, and parallel hits. Its `Miss` case remains the historical
-in-range Bloom-filter path.
+The persisted-read workload runs in both `BloomEnabled` and `BloomDisabled`
+modes and distinguishes hits, in-range misses, out-of-range misses, and
+parallel hits. Run only the point-read matrix with:
+
+```sh
+go test -run '^$' \
+  -bench '^BenchmarkComparison$/^GetPersistedWarm$/^(BloomEnabled|BloomDisabled)$/^(HyphaDB|Pebble)$/^(Hit|InRangeMiss|OutOfRangeMiss)$' \
+  -benchmem -benchtime=1000x -count=5 \
+  -args -storage-root="$PWD/.benchmark-data"
+```
 
 HyphaDB's native benchmark suite additionally contains direct Bloom-filter
 checks and isolated L0-to-L1 and L1-to-L2 compaction benchmarks. Compaction
@@ -106,6 +113,9 @@ removed after each benchmark. The supplied root itself is retained.
   memtables to reduce flush interference. An engine can still flush if a run
   exceeds its active memtable.
 - Both engines use a 64 MiB block cache.
+- Bloom-enabled fixtures use HyphaDB's 1% false-positive target and Pebble's
+  10-bits-per-key table Bloom policy. Bloom-disabled fixtures omit filters for
+  both engines.
 - Persisted-read fixtures contain the same 10,000 records and are explicitly
   warmed before timing.
 - Multi-table fixtures contain eight logical flush runs with 1,250 records

@@ -14,10 +14,18 @@ import (
 )
 
 func CreateFromMemTable(mt *memtable.MemTable, path string) (*SSTable, error) {
+	return CreateFromMemTableWithOptions(mt, path, DefaultWriteOptions())
+}
+
+func CreateFromMemTableWithOptions(
+	mt *memtable.MemTable,
+	path string,
+	opts WriteOptions,
+) (*SSTable, error) {
 	it := mt.Iterator()
 	defer it.Close()
 
-	return CreateFromIteratorWithOptions(it, mt.Len(), path, DefaultWriteOptions())
+	return CreateFromIteratorWithOptions(it, mt.Len(), path, opts)
 }
 
 func CreateFromRecords(

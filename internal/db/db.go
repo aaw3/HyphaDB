@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,6 +28,7 @@ type DB struct {
 	memTableSize        int
 	sstables            []*sstable.SSTable
 	blockCache          blockcache.Cache
+	sstableWriteOptions sstable.WriteOptions
 	wal                 *wal.WAL
 	manifest            *manifest.Manifest
 	manifestPath        string
@@ -66,6 +68,7 @@ type Options struct {
 	Memtable   MemtableOptions
 	Compaction CompactionOptions
 	BlockCache BlockCacheOptions
+	SSTable    SSTableOptions
 	Limits     LimitsOptions
 }
 
@@ -85,6 +88,15 @@ type BlockCacheOptions struct {
 	// CapacityBytes bounds the SSTable block cache. Zero selects the default.
 	// Negative values are invalid.
 	CapacityBytes int
+}
+
+type SSTableOptions struct {
+	BloomFilter BloomFilterOptions
+}
+
+type BloomFilterOptions struct {
+	Disabled          bool
+	FalsePositiveRate float64
 }
 
 // LimitsOptions bounds memory used by individual writes and batches.
@@ -128,6 +140,10 @@ func Open(opts Options) (*DB, error) {
 	}
 	if opts.BlockCache.CapacityBytes == 0 {
 		opts.BlockCache.CapacityBytes = defaultBlockCacheCapacity
+	}
+	sstableWriteOptions, err := normalizeSSTableOptions(opts.SSTable)
+	if err != nil {
+		return nil, err
 	}
 	if err := normalizeLimits(&opts.Limits); err != nil {
 		return nil, err
@@ -204,6 +220,7 @@ func Open(opts Options) (*DB, error) {
 		memTableSize:        mt.Len(),
 		sstables:            make([]*sstable.SSTable, 0, len(mf.SSTables)),
 		blockCache:          cache,
+		sstableWriteOptions: sstableWriteOptions,
 		wal:                 w,
 		manifest:            mf,
 		manifestPath:        manifestPath,
@@ -247,6 +264,22 @@ func Open(opts Options) (*DB, error) {
 
 	opened = true
 	return database, nil
+}
+
+func normalizeSSTableOptions(opts SSTableOptions) (sstable.WriteOptions, error) {
+	writeOptions := sstable.DefaultWriteOptions()
+	writeOptions.Bloom.Enabled = !opts.BloomFilter.Disabled
+
+	falsePositiveRate := opts.BloomFilter.FalsePositiveRate
+	if math.IsNaN(falsePositiveRate) || falsePositiveRate < 0 || falsePositiveRate >= 1 {
+		return sstable.WriteOptions{}, fmt.Errorf(
+			"bloom filter false-positive rate must be in (0, 1), or zero for the default",
+		)
+	}
+	if falsePositiveRate > 0 {
+		writeOptions.Bloom.FalsePositiveRate = falsePositiveRate
+	}
+	return writeOptions, nil
 }
 
 func normalizeLimits(limits *LimitsOptions) error {
@@ -372,6 +405,7 @@ func (db *DB) compactLocked(threshold int) error {
 			OldestReader: retention,
 			DropTombstones: plan.TargetLevel ==
 				compaction.HighestSupportedLevel,
+			WriteOptions: &db.sstableWriteOptions,
 		},
 	)
 	if err != nil {
@@ -748,7 +782,11 @@ func (db *DB) flushImmutableMemtable(imm *memtable.ImmutableMemTable) error {
 	db.manifest.NextSSTableID++
 	db.mu.Unlock()
 
-	createdSSTable, err := sstable.CreateFromMemTable(imm.MemTable, sstablePath)
+	createdSSTable, err := sstable.CreateFromMemTableWithOptions(
+		imm.MemTable,
+		sstablePath,
+		db.sstableWriteOptions,
+	)
 	if err != nil {
 		db.mu.Lock()
 		db.manifest.NextSSTableID = oldNextSSTableID

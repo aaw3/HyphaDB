@@ -7,6 +7,7 @@ import (
 
 	hyphadb "github.com/aaw3/hyphadb"
 	"github.com/cockroachdb/pebble/v2"
+	pebblebloom "github.com/cockroachdb/pebble/v2/bloom"
 )
 
 const (
@@ -52,6 +53,7 @@ type engineFactory struct {
 	name                   string
 	openCompactionDisabled func(string) (benchmarkDB, error)
 	openPersisted          func(string, []benchmarkRecord) (benchmarkDB, error)
+	openPersistedWithBloom func(string, []benchmarkRecord, bool) (benchmarkDB, error)
 	openPersistedTables    func(string, []benchmarkRecord, int) (benchmarkDB, error)
 }
 
@@ -60,12 +62,14 @@ var engines = []engineFactory{
 		name:                   "HyphaDB",
 		openCompactionDisabled: openHyphaCompactionDisabled,
 		openPersisted:          openHyphaPersisted,
+		openPersistedWithBloom: openHyphaPersistedWithBloom,
 		openPersistedTables:    openHyphaPersistedTables,
 	},
 	{
 		name:                   "Pebble",
 		openCompactionDisabled: openPebbleCompactionDisabled,
 		openPersisted:          openPebblePersisted,
+		openPersistedWithBloom: openPebblePersistedWithBloom,
 		openPersistedTables:    openPebblePersistedTables,
 	},
 }
@@ -97,13 +101,30 @@ func openHyphaPersisted(
 	dir string,
 	records []benchmarkRecord,
 ) (benchmarkDB, error) {
-	return openHyphaPersistedTables(dir, records, 1)
+	return openHyphaPersistedWithBloom(dir, records, true)
+}
+
+func openHyphaPersistedWithBloom(
+	dir string,
+	records []benchmarkRecord,
+	enabled bool,
+) (benchmarkDB, error) {
+	return openHyphaPersistedTablesWithBloom(dir, records, 1, enabled)
 }
 
 func openHyphaPersistedTables(
 	dir string,
 	records []benchmarkRecord,
 	tableCount int,
+) (benchmarkDB, error) {
+	return openHyphaPersistedTablesWithBloom(dir, records, tableCount, true)
+}
+
+func openHyphaPersistedTablesWithBloom(
+	dir string,
+	records []benchmarkRecord,
+	tableCount int,
+	bloomEnabled bool,
 ) (benchmarkDB, error) {
 	if tableCount <= 0 || len(records)%tableCount != 0 {
 		return nil, fmt.Errorf(
@@ -123,6 +144,11 @@ func openHyphaPersistedTables(
 		},
 		BlockCache: hyphadb.BlockCacheOptions{
 			CapacityBytes: cacheSize,
+		},
+		SSTable: hyphadb.SSTableOptions{
+			BloomFilter: hyphadb.BloomFilterOptions{
+				Disabled: !bloomEnabled,
+			},
 		},
 	}
 	db, err := hyphadb.Open(options)
@@ -242,18 +268,26 @@ func (benchmarkPebbleLogger) Fatalf(format string, args ...interface{}) {
 	panic(fmt.Sprintf(format, args...))
 }
 
-func pebbleOptions() *pebble.Options {
-	return &pebble.Options{
+func pebbleOptions(bloomEnabled bool) *pebble.Options {
+	opts := &pebble.Options{
 		CacheSize:                   cacheSize,
 		MemTableSize:                512 * 1024 * 1024,
 		MemTableStopWritesThreshold: 4,
 		DisableAutomaticCompactions: true,
 		Logger:                      benchmarkPebbleLogger{},
 	}
+	opts.EnsureDefaults()
+	if bloomEnabled {
+		policy := pebblebloom.FilterPolicy(10)
+		for i := range opts.Levels {
+			opts.Levels[i].FilterPolicy = policy
+		}
+	}
+	return opts
 }
 
 func openPebbleCompactionDisabled(dir string) (benchmarkDB, error) {
-	db, err := pebble.Open(dir, pebbleOptions())
+	db, err := pebble.Open(dir, pebbleOptions(true))
 	if err != nil {
 		return nil, err
 	}
@@ -264,13 +298,30 @@ func openPebblePersisted(
 	dir string,
 	records []benchmarkRecord,
 ) (benchmarkDB, error) {
-	return openPebblePersistedTables(dir, records, 1)
+	return openPebblePersistedWithBloom(dir, records, true)
+}
+
+func openPebblePersistedWithBloom(
+	dir string,
+	records []benchmarkRecord,
+	enabled bool,
+) (benchmarkDB, error) {
+	return openPebblePersistedTablesWithBloom(dir, records, 1, enabled)
 }
 
 func openPebblePersistedTables(
 	dir string,
 	records []benchmarkRecord,
 	tableCount int,
+) (benchmarkDB, error) {
+	return openPebblePersistedTablesWithBloom(dir, records, tableCount, true)
+}
+
+func openPebblePersistedTablesWithBloom(
+	dir string,
+	records []benchmarkRecord,
+	tableCount int,
+	bloomEnabled bool,
 ) (benchmarkDB, error) {
 	if tableCount <= 0 || len(records)%tableCount != 0 {
 		return nil, fmt.Errorf(
@@ -280,7 +331,7 @@ func openPebblePersistedTables(
 		)
 	}
 	recordsPerTable := len(records) / tableCount
-	db, err := pebble.Open(dir, pebbleOptions())
+	db, err := pebble.Open(dir, pebbleOptions(bloomEnabled))
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +351,7 @@ func openPebblePersistedTables(
 		return nil, err
 	}
 
-	db, err = pebble.Open(dir, pebbleOptions())
+	db, err = pebble.Open(dir, pebbleOptions(bloomEnabled))
 	if err != nil {
 		return nil, err
 	}

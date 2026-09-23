@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/aaw3/hyphadb/internal/compression"
 )
@@ -74,7 +75,8 @@ func normalizeWriteOptions(opts WriteOptions) (WriteOptions, error) {
 	}
 
 	if opts.Bloom.Enabled {
-		if opts.Bloom.FalsePositiveRate <= 0 ||
+		if math.IsNaN(opts.Bloom.FalsePositiveRate) ||
+			opts.Bloom.FalsePositiveRate <= 0 ||
 			opts.Bloom.FalsePositiveRate >= 1 {
 			return WriteOptions{}, fmt.Errorf(
 				"invalid bloom filter false positive rate: %f, must be in (0, 1)",

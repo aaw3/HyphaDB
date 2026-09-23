@@ -288,65 +288,81 @@ func benchmarkGetPersistedWarm(b *testing.B) {
 		"zzzz/out-of-range/0004",
 	)
 
-	for _, engine := range engines {
-		b.Run(engine.name, func(b *testing.B) {
-			database := openPersistedBenchmarkDB(b, engine, records)
-			warmReads(b, database, readKeys)
+	for _, bloomCase := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "BloomEnabled", enabled: true},
+		{name: "BloomDisabled", enabled: false},
+	} {
+		b.Run(bloomCase.name, func(b *testing.B) {
+			for _, engine := range engines {
+				b.Run(engine.name, func(b *testing.B) {
+					database := openPersistedBloomBenchmarkDB(
+						b,
+						engine,
+						records,
+						bloomCase.enabled,
+					)
+					warmReads(b, database, readKeys)
 
-			b.Run("Hit", func(b *testing.B) {
-				b.ReportAllocs()
-				b.SetBytes(valueSize)
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					got, found, err := database.Get(readKeys[i%len(readKeys)])
-					if err != nil || !found {
-						b.Fatalf("Get found=%t, err=%v", found, err)
-					}
-					resultBytes = got
-				}
-			})
-
-			b.Run("Miss", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					if _, found, err := database.Get(misses[i%len(misses)]); err != nil || found {
-						b.Fatalf("Get missing found=%t, err=%v", found, err)
-					}
-				}
-			})
-
-			b.Run("OutOfRangeMiss", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					key := outOfRangeKeys[i%len(outOfRangeKeys)]
-					if _, found, err := database.Get(key); err != nil || found {
-						b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
-					}
-				}
-			})
-
-			b.Run("ParallelHit", func(b *testing.B) {
-				b.ReportAllocs()
-				b.SetBytes(valueSize)
-				b.ResetTimer()
-				b.RunParallel(func(pb *testing.PB) {
-					index := 0
-					var got []byte
-					for pb.Next() {
-						var found bool
-						var err error
-						got, found, err = database.Get(readKeys[index%len(readKeys)])
-						if err != nil || !found {
-							b.Errorf("parallel Get found=%t, err=%v", found, err)
-							return
+					b.Run("Hit", func(b *testing.B) {
+						b.ReportAllocs()
+						b.SetBytes(valueSize)
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							got, found, err := database.Get(readKeys[i%len(readKeys)])
+							if err != nil || !found {
+								b.Fatalf("Get found=%t, err=%v", found, err)
+							}
+							resultBytes = got
 						}
-						index++
-					}
-					runtime.KeepAlive(got)
+					})
+
+					b.Run("InRangeMiss", func(b *testing.B) {
+						b.ReportAllocs()
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							key := misses[i%len(misses)]
+							if _, found, err := database.Get(key); err != nil || found {
+								b.Fatalf("Get missing found=%t, err=%v", found, err)
+							}
+						}
+					})
+
+					b.Run("OutOfRangeMiss", func(b *testing.B) {
+						b.ReportAllocs()
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							key := outOfRangeKeys[i%len(outOfRangeKeys)]
+							if _, found, err := database.Get(key); err != nil || found {
+								b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
+							}
+						}
+					})
+
+					b.Run("ParallelHit", func(b *testing.B) {
+						b.ReportAllocs()
+						b.SetBytes(valueSize)
+						b.ResetTimer()
+						b.RunParallel(func(pb *testing.PB) {
+							index := 0
+							var got []byte
+							for pb.Next() {
+								var found bool
+								var err error
+								got, found, err = database.Get(readKeys[index%len(readKeys)])
+								if err != nil || !found {
+									b.Errorf("parallel Get found=%t, err=%v", found, err)
+									return
+								}
+								index++
+							}
+							runtime.KeepAlive(got)
+						})
+					})
 				})
-			})
+			}
 		})
 	}
 }
@@ -676,6 +692,31 @@ func openPersistedBenchmarkDB(
 	b.Helper()
 	b.StopTimer()
 	database, err := engine.openPersisted(benchmarkDataDir(b, engine.name), records)
+	if err != nil {
+		b.Fatalf("open persisted %s fixture: %v", engine.name, err)
+	}
+	b.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			b.Errorf("close %s: %v", engine.name, err)
+		}
+	})
+	b.StartTimer()
+	return database
+}
+
+func openPersistedBloomBenchmarkDB(
+	b *testing.B,
+	engine engineFactory,
+	records []benchmarkRecord,
+	bloomEnabled bool,
+) benchmarkDB {
+	b.Helper()
+	b.StopTimer()
+	database, err := engine.openPersistedWithBloom(
+		benchmarkDataDir(b, engine.name),
+		records,
+		bloomEnabled,
+	)
 	if err != nil {
 		b.Fatalf("open persisted %s fixture: %v", engine.name, err)
 	}

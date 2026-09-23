@@ -24,6 +24,7 @@ type Options struct {
 	Memtable   MemtableOptions
 	Compaction CompactionOptions
 	BlockCache BlockCacheOptions
+	SSTable    SSTableOptions
 	Limits     LimitsOptions
 }
 
@@ -43,6 +44,18 @@ type BlockCacheOptions struct {
 	// CapacityBytes bounds the SSTable block cache. Zero selects a default.
 	// Negative values are invalid.
 	CapacityBytes int
+}
+
+type SSTableOptions struct {
+	BloomFilter BloomFilterOptions
+}
+
+type BloomFilterOptions struct {
+	// Disabled prevents newly written SSTables from including a Bloom filter.
+	Disabled bool
+	// FalsePositiveRate controls the target false-positive probability. Zero
+	// selects the default.
+	FalsePositiveRate float64
 }
 
 // LimitsOptions bounds memory used by individual writes and batches.
@@ -87,6 +100,12 @@ func Open(opts Options) (*DB, error) {
 		},
 		BlockCache: internaldb.BlockCacheOptions{
 			CapacityBytes: opts.BlockCache.CapacityBytes,
+		},
+		SSTable: internaldb.SSTableOptions{
+			BloomFilter: internaldb.BloomFilterOptions{
+				Disabled:          opts.SSTable.BloomFilter.Disabled,
+				FalsePositiveRate: opts.SSTable.BloomFilter.FalsePositiveRate,
+			},
 		},
 		Limits: internaldb.LimitsOptions{
 			MaxKeyBytes:        opts.Limits.MaxKeyBytes,

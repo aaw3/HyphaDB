@@ -15,6 +15,7 @@ func MergeSSTables(sstables []*sstable.SSTable, newPath string) (*sstable.SSTabl
 type MergeOptions struct {
 	OldestReader   *uint64
 	DropTombstones bool
+	WriteOptions   *sstable.WriteOptions
 }
 
 // MergeSSTablesWithRetention merges tables while preserving the versions
@@ -122,7 +123,11 @@ func MergeSSTablesWithOptions(
 		}
 	}
 
-	return sstable.CreateFromRecords(output, newPath, sstable.DefaultBlockSize)
+	writeOptions := sstable.DefaultWriteOptions()
+	if options.WriteOptions != nil {
+		writeOptions = *options.WriteOptions
+	}
+	return sstable.CreateFromRecordsWithOptions(output, newPath, writeOptions)
 }
 
 func closeIterators(iters []*sstable.Iterator) {
