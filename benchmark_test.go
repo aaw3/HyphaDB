@@ -160,6 +160,12 @@ func BenchmarkGetSSTableWarm(b *testing.B) {
 	database, keys, value := openSSTableBenchmarkDB(b)
 	readKeys := benchmarkShuffledKeys(keys)
 	missingKeys := benchmarkShuffledKeys(benchmarkMissingKeys(keys))
+	outOfRangeKeys := []string{
+		"zzzz/out-of-range/0001",
+		"zzzz/out-of-range/0002",
+		"zzzz/out-of-range/0003",
+		"zzzz/out-of-range/0004",
+	}
 	warmBenchmarkReads(b, database, readKeys)
 
 	b.Run("Hit", func(b *testing.B) {
@@ -190,7 +196,8 @@ func BenchmarkGetSSTableWarm(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := database.Get("zzzz/out-of-range"); !errors.Is(err, hyphadb.ErrNotFound) {
+			key := outOfRangeKeys[i%len(outOfRangeKeys)]
+			if _, err := database.Get(key); !errors.Is(err, hyphadb.ErrNotFound) {
 				b.Fatalf("Get out-of-range key: %v", err)
 			}
 		}
@@ -228,6 +235,12 @@ func BenchmarkGetSSTableWarmMultiTable(b *testing.B) {
 	lowKeys := benchmarkShuffledKeys(keys[:recordsPerTable])
 	highKeys := benchmarkShuffledKeys(keys[len(keys)-recordsPerTable:])
 	missingKeys := benchmarkShuffledKeys(benchmarkMissingKeys(keys))
+	outOfRangeKeys := []string{
+		"zzzz/out-of-range/0001",
+		"zzzz/out-of-range/0002",
+		"zzzz/out-of-range/0003",
+		"zzzz/out-of-range/0004",
+	}
 	warmBenchmarkReads(b, database, benchmarkShuffledKeys(keys))
 
 	for _, readCase := range []struct {
@@ -266,7 +279,8 @@ func BenchmarkGetSSTableWarmMultiTable(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := database.Get("zzzz/out-of-range"); !errors.Is(err, hyphadb.ErrNotFound) {
+			key := outOfRangeKeys[i%len(outOfRangeKeys)]
+			if _, err := database.Get(key); !errors.Is(err, hyphadb.ErrNotFound) {
 				b.Fatalf("Get out-of-range key: %v", err)
 			}
 		}

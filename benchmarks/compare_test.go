@@ -281,6 +281,12 @@ func benchmarkGetPersistedWarm(b *testing.B) {
 	keys := datasetKeys(records)
 	readKeys := shuffledKeys(keys, *benchmarkSeed)
 	misses := shuffledKeys(missingKeys(keys), *benchmarkSeed)
+	outOfRangeKeys := benchmarkKeys(
+		"zzzz/out-of-range/0001",
+		"zzzz/out-of-range/0002",
+		"zzzz/out-of-range/0003",
+		"zzzz/out-of-range/0004",
+	)
 
 	for _, engine := range engines {
 		b.Run(engine.name, func(b *testing.B) {
@@ -311,14 +317,11 @@ func benchmarkGetPersistedWarm(b *testing.B) {
 			})
 
 			b.Run("OutOfRangeMiss", func(b *testing.B) {
-				missing := benchmarkKey{
-					text: "zzzz/out-of-range",
-					raw:  []byte("zzzz/out-of-range"),
-				}
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					if _, found, err := database.Get(missing); err != nil || found {
+					key := outOfRangeKeys[i%len(outOfRangeKeys)]
+					if _, found, err := database.Get(key); err != nil || found {
 						b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
 					}
 				}
@@ -355,10 +358,12 @@ func benchmarkGetPersistedWarmMultiTable(b *testing.B) {
 	lowKeys := shuffledKeys(keys[:recordsPerTable], *benchmarkSeed)
 	highKeys := shuffledKeys(keys[len(keys)-recordsPerTable:], *benchmarkSeed)
 	misses := shuffledKeys(missingKeys(keys), *benchmarkSeed)
-	outOfRange := benchmarkKey{
-		text: "zzzz/out-of-range",
-		raw:  []byte("zzzz/out-of-range"),
-	}
+	outOfRangeKeys := benchmarkKeys(
+		"zzzz/out-of-range/0001",
+		"zzzz/out-of-range/0002",
+		"zzzz/out-of-range/0003",
+		"zzzz/out-of-range/0004",
+	)
 
 	for _, engine := range engines {
 		b.Run(engine.name, func(b *testing.B) {
@@ -407,7 +412,8 @@ func benchmarkGetPersistedWarmMultiTable(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					if _, found, err := database.Get(outOfRange); err != nil || found {
+					key := outOfRangeKeys[i%len(outOfRangeKeys)]
+					if _, found, err := database.Get(key); err != nil || found {
 						b.Fatalf("Get out-of-range found=%t, err=%v", found, err)
 					}
 				}
@@ -438,6 +444,14 @@ func benchmarkGetPersistedWarmMultiTable(b *testing.B) {
 			})
 		})
 	}
+}
+
+func benchmarkKeys(keys ...string) []benchmarkKey {
+	result := make([]benchmarkKey, len(keys))
+	for i, key := range keys {
+		result[i] = benchmarkKey{text: key, raw: []byte(key)}
+	}
+	return result
 }
 
 func benchmarkGetPersistedWarmValueSizes(b *testing.B) {
