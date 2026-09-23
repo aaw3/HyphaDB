@@ -73,6 +73,10 @@ func (it *Iterator) Seek(key string) error {
 	if err := it.loadBlock(blockIndex); err != nil {
 		return err
 	}
+	if err := it.blockCursor.seek(key); err != nil {
+		it.err = err
+		return err
+	}
 
 	for {
 		rec, ok := it.blockCursor.next()
@@ -132,7 +136,7 @@ func (it *Iterator) loadBlock(blockIndex int) error {
 		return err
 	}
 
-	cursor, err := newLogicalBlockCursor(logical)
+	cursor, err := newLogicalBlockCursorForVersion(logical, it.sst.formatVersion)
 	if err != nil {
 		it.err = err
 		return err

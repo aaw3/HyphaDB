@@ -1,7 +1,6 @@
 package sstable
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"unsafe"
 
 	"github.com/aaw3/hyphadb/internal/blockcache"
@@ -146,75 +146,44 @@ func decodePhysicalBlock(physical []byte) ([]byte, error) {
 }
 
 func decodeLogicalBlock(buf []byte) ([]record.Record, error) {
-	if len(buf) < 4 {
-		return nil, fmt.Errorf(
-			"%w: logical block missing record count",
-			ErrCorruptSSTable,
-		)
+	cursor, err := newLogicalBlockCursor(buf)
+	if err != nil {
+		return nil, err
 	}
 
-	r := bytes.NewReader(buf)
-
-	var countBuf [4]byte
-	if _, err := io.ReadFull(r, countBuf[:]); err != nil {
-		return nil, fmt.Errorf(
-			"%w: read record count: %w",
-			ErrCorruptSSTable,
-			err,
-		)
-	}
-
-	count := binary.LittleEndian.Uint32(countBuf[:])
-
-	if uint64(count) > uint64(r.Len())/uint64(record.HeaderSize) {
-		return nil, fmt.Errorf(
-			"%w: record count %d cannot fit in block with %d remaining bytes",
-			ErrCorruptSSTable,
-			count,
-			r.Len(),
-		)
-	}
-
-	records := make([]record.Record, 0, count)
-
-	// decode each record in the block
-	for i := uint32(0); i < count; i++ {
-		rec, err := record.DecodeBinary(r)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"%w: decode record %d: %w",
-				ErrCorruptSSTable,
-				i,
-				err,
-			)
+	records := make([]record.Record, 0, cursor.count)
+	for {
+		rec, ok := cursor.next()
+		if !ok {
+			break
 		}
-
 		records = append(records, rec)
 	}
-
-	if r.Len() != 0 {
-		return nil, fmt.Errorf(
-			"%w: block has %d unexpected trailing bytes",
-			ErrCorruptSSTable,
-			r.Len(),
-		)
-	}
-
-	return records, nil
+	return records, cursor.err
 }
 
 // logicalBlockCursor walks records directly from an immutable logical block.
 // Records returned by next reference data owned by the block, so the block must
 // remain alive and must not be modified while those records are in use.
 type logicalBlockCursor struct {
-	data   []byte
-	count  uint32
-	index  uint32
-	offset int
-	err    error
+	data            []byte
+	count           uint32
+	index           uint32
+	offset          int
+	recordsEnd      int
+	restartInterval uint32
+	restartOffsets  []byte
+	err             error
 }
 
 func newLogicalBlockCursor(buf []byte) (logicalBlockCursor, error) {
+	return newLogicalBlockCursorForVersion(buf, currentFormatVersion)
+}
+
+func newLogicalBlockCursorForVersion(
+	buf []byte,
+	formatVersion byte,
+) (logicalBlockCursor, error) {
 	if len(buf) < 4 {
 		return logicalBlockCursor{}, fmt.Errorf(
 			"%w: logical block missing record count",
@@ -223,7 +192,88 @@ func newLogicalBlockCursor(buf []byte) (logicalBlockCursor, error) {
 	}
 
 	count := binary.LittleEndian.Uint32(buf[:4])
-	remaining := len(buf) - 4
+	recordsEnd := len(buf)
+	var restartInterval uint32
+	var restartOffsets []byte
+
+	switch formatVersion {
+	case legacyFormatVersion:
+	case currentFormatVersion:
+		if len(buf) < 12 {
+			return logicalBlockCursor{}, fmt.Errorf(
+				"%w: restart block is too small",
+				ErrCorruptSSTable,
+			)
+		}
+
+		restartCount := binary.LittleEndian.Uint32(buf[len(buf)-4:])
+		metadataSize := uint64(restartCount)*4 + 8
+		if metadataSize > uint64(len(buf)-4) {
+			return logicalBlockCursor{}, fmt.Errorf(
+				"%w: restart metadata exceeds block size",
+				ErrCorruptSSTable,
+			)
+		}
+
+		recordsEnd = len(buf) - int(metadataSize)
+		restartOffsets = buf[recordsEnd : len(buf)-8]
+		restartInterval = binary.LittleEndian.Uint32(buf[len(buf)-8 : len(buf)-4])
+		if restartInterval == 0 {
+			return logicalBlockCursor{}, fmt.Errorf(
+				"%w: restart interval is zero",
+				ErrCorruptSSTable,
+			)
+		}
+
+		expectedRestarts := uint64(0)
+		if count > 0 {
+			expectedRestarts = (uint64(count) + uint64(restartInterval) - 1) /
+				uint64(restartInterval)
+		}
+		if uint64(restartCount) != expectedRestarts {
+			return logicalBlockCursor{}, fmt.Errorf(
+				"%w: restart count %d does not match record count %d and interval %d",
+				ErrCorruptSSTable,
+				restartCount,
+				count,
+				restartInterval,
+			)
+		}
+
+		var previous uint32
+		for i := uint32(0); i < restartCount; i++ {
+			offset := binary.LittleEndian.Uint32(restartOffsets[i*4:])
+			if offset < 4 || uint64(offset) >= uint64(recordsEnd) {
+				return logicalBlockCursor{}, fmt.Errorf(
+					"%w: restart offset %d is outside record data",
+					ErrCorruptSSTable,
+					offset,
+				)
+			}
+			if i == 0 && offset != 4 {
+				return logicalBlockCursor{}, fmt.Errorf(
+					"%w: first restart offset is %d, want 4",
+					ErrCorruptSSTable,
+					offset,
+				)
+			}
+			if i > 0 && offset <= previous {
+				return logicalBlockCursor{}, fmt.Errorf(
+					"%w: restart offsets are not increasing",
+					ErrCorruptSSTable,
+				)
+			}
+			previous = offset
+		}
+	default:
+		return logicalBlockCursor{}, fmt.Errorf(
+			"%w: unsupported block format version: %d",
+			ErrCorruptSSTable,
+			formatVersion,
+		)
+	}
+
+	remaining := recordsEnd - 4
 	if uint64(count) > uint64(remaining)/uint64(record.HeaderSize) {
 		return logicalBlockCursor{}, fmt.Errorf(
 			"%w: record count %d cannot fit in block with %d remaining bytes",
@@ -234,10 +284,49 @@ func newLogicalBlockCursor(buf []byte) (logicalBlockCursor, error) {
 	}
 
 	return logicalBlockCursor{
-		data:   buf,
-		count:  count,
-		offset: 4,
+		data:            buf,
+		count:           count,
+		offset:          4,
+		recordsEnd:      recordsEnd,
+		restartInterval: restartInterval,
+		restartOffsets:  restartOffsets,
 	}, nil
+}
+
+func (c *logicalBlockCursor) seek(key string) error {
+	if c.err != nil || len(c.restartOffsets) == 0 {
+		return c.err
+	}
+
+	restartCount := len(c.restartOffsets) / 4
+	var searchErr error
+	i := sort.Search(restartCount, func(i int) bool {
+		offset := c.restartOffset(i)
+		rec, _, err := decodeRecordView(c.data[offset:c.recordsEnd])
+		if err != nil {
+			searchErr = err
+			return true
+		}
+		return rec.Key >= key
+	})
+	if searchErr != nil {
+		c.err = fmt.Errorf("%w: decode restart record: %v", ErrCorruptSSTable, searchErr)
+		return c.err
+	}
+	if i == restartCount {
+		i = restartCount - 1
+	} else if i > 0 {
+		i--
+	}
+
+	c.offset = c.restartOffset(i)
+	c.index = uint32(i) * c.restartInterval
+	return nil
+}
+
+func (c *logicalBlockCursor) restartOffset(index int) int {
+	start := index * 4
+	return int(binary.LittleEndian.Uint32(c.restartOffsets[start : start+4]))
 }
 
 func (c *logicalBlockCursor) next() (record.Record, bool) {
@@ -246,17 +335,17 @@ func (c *logicalBlockCursor) next() (record.Record, bool) {
 	}
 
 	if c.index == c.count {
-		if c.offset != len(c.data) {
+		if c.offset != c.recordsEnd {
 			c.err = fmt.Errorf(
 				"%w: block has %d unexpected trailing bytes",
 				ErrCorruptSSTable,
-				len(c.data)-c.offset,
+				c.recordsEnd-c.offset,
 			)
 		}
 		return record.Record{}, false
 	}
 
-	rec, size, err := decodeRecordView(c.data[c.offset:])
+	rec, size, err := decodeRecordView(c.data[c.offset:c.recordsEnd])
 	if err != nil {
 		c.err = fmt.Errorf(
 			"%w: decode record %d: %v",

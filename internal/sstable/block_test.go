@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"math/rand"
 	"reflect"
@@ -56,12 +57,41 @@ func makeLogicalBlock(t *testing.T, records []record.Record) []byte {
 		t.Fatalf("write record count: %v", err)
 	}
 
-	for _, rec := range records {
+	var restartOffsets []uint32
+	for i, rec := range records {
+		if i%DefaultRestartInterval == 0 {
+			restartOffsets = append(restartOffsets, uint32(buf.Len()))
+		}
 		if err := record.EncodeBinary(&buf, rec); err != nil {
 			t.Fatalf("encode record: %v", err)
 		}
 	}
 
+	var metadata [4]byte
+	for _, offset := range restartOffsets {
+		binary.LittleEndian.PutUint32(metadata[:], offset)
+		buf.Write(metadata[:])
+	}
+	binary.LittleEndian.PutUint32(metadata[:], DefaultRestartInterval)
+	buf.Write(metadata[:])
+	binary.LittleEndian.PutUint32(metadata[:], uint32(len(restartOffsets)))
+	buf.Write(metadata[:])
+
+	return buf.Bytes()
+}
+
+func makeLegacyLogicalBlock(t *testing.T, records []record.Record) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	var count [4]byte
+	binary.LittleEndian.PutUint32(count[:], uint32(len(records)))
+	buf.Write(count[:])
+	for _, rec := range records {
+		if err := record.EncodeBinary(&buf, rec); err != nil {
+			t.Fatalf("encode legacy record: %v", err)
+		}
+	}
 	return buf.Bytes()
 }
 
@@ -238,6 +268,75 @@ func TestLogicalBlockCursorReturnsRecordViews(t *testing.T) {
 	}
 }
 
+func TestLogicalBlockCursorSeeksFromRestartPoint(t *testing.T) {
+	records := make([]record.Record, 64)
+	for i := range records {
+		records[i] = record.Record{
+			Key:   fmt.Sprintf("key/%04d", i),
+			Seq:   uint64(i + 1),
+			Entry: record.Entry{Value: []byte("value")},
+		}
+	}
+
+	cursor, err := newLogicalBlockCursor(makeLogicalBlock(t, records))
+	if err != nil {
+		t.Fatalf("newLogicalBlockCursor: %v", err)
+	}
+	if err := cursor.seek("key/0031"); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	if cursor.index != 16 {
+		t.Fatalf("cursor index after seek = %d, want restart index 16", cursor.index)
+	}
+
+	decoded := 0
+	for {
+		rec, ok := cursor.next()
+		if !ok {
+			t.Fatalf("target record missing: %v", cursor.err)
+		}
+		decoded++
+		if rec.Key >= "key/0031" {
+			if rec.Key != "key/0031" {
+				t.Fatalf("seek landed on %q, want key/0031", rec.Key)
+			}
+			break
+		}
+	}
+	if decoded != 16 {
+		t.Fatalf("records decoded after seek = %d, want 16", decoded)
+	}
+}
+
+func TestLogicalBlockCursorReadsLegacyFormat(t *testing.T) {
+	want := []record.Record{
+		{Key: "apple", Seq: 2, Entry: record.Entry{Value: []byte("green")}},
+		{Key: "banana", Seq: 1, Entry: record.Entry{Value: []byte("yellow")}},
+	}
+	cursor, err := newLogicalBlockCursorForVersion(
+		makeLegacyLogicalBlock(t, want),
+		legacyFormatVersion,
+	)
+	if err != nil {
+		t.Fatalf("new legacy cursor: %v", err)
+	}
+
+	var got []record.Record
+	for {
+		rec, ok := cursor.next()
+		if !ok {
+			break
+		}
+		got = append(got, rec)
+	}
+	if cursor.err != nil {
+		t.Fatalf("legacy cursor: %v", cursor.err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy records = %+v, want %+v", got, want)
+	}
+}
+
 func TestLogicalBlockCursorDoesNotAllocatePerRecord(t *testing.T) {
 	logical := makeLogicalBlock(t, []record.Record{
 		{Key: "apple", Seq: 3, Entry: record.Entry{Value: []byte("green")}},
@@ -298,7 +397,8 @@ func TestLogicalBlockCursorRejectsTrailingBytes(t *testing.T) {
 
 	cursor, err := newLogicalBlockCursor(logical)
 	if err != nil {
-		t.Fatalf("newLogicalBlockCursor: %v", err)
+		requireErrorIs(t, err, ErrCorruptSSTable)
+		return
 	}
 	if _, ok := cursor.next(); !ok {
 		t.Fatalf("record missing: %v", cursor.err)

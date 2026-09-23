@@ -8,12 +8,14 @@ import (
 
 const (
 	DefaultBlockSize                 = 64 * 1024 // 64KB
+	DefaultRestartInterval           = 16
 	DefaultFalsePositiveRate         = 0.01
 	DefaultMinCompressionSavingsRate = 0.125
 )
 
 type WriteOptions struct {
 	BlockSize                 int
+	RestartInterval           int
 	Compression               compression.Type
 	MinCompressionSavingsRate float64
 
@@ -28,6 +30,7 @@ type BloomFilterOptions struct {
 func DefaultWriteOptions() WriteOptions {
 	return WriteOptions{
 		BlockSize:                 DefaultBlockSize,
+		RestartInterval:           DefaultRestartInterval,
 		Compression:               compression.LZ4,
 		MinCompressionSavingsRate: DefaultMinCompressionSavingsRate,
 
@@ -41,6 +44,16 @@ func DefaultWriteOptions() WriteOptions {
 func normalizeWriteOptions(opts WriteOptions) (WriteOptions, error) {
 	if opts.BlockSize <= 0 {
 		opts.BlockSize = DefaultBlockSize
+	}
+	if opts.RestartInterval <= 0 {
+		opts.RestartInterval = DefaultRestartInterval
+	}
+	if uint64(opts.RestartInterval) > uint64(^uint32(0)) {
+		return WriteOptions{}, fmt.Errorf(
+			"restart interval %d exceeds maximum %d",
+			opts.RestartInterval,
+			uint64(^uint32(0)),
+		)
 	}
 
 	if opts.MinCompressionSavingsRate < 0 || opts.MinCompressionSavingsRate >= 1 {

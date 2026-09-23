@@ -78,6 +78,7 @@ func CreateFromIteratorWithOptions(
 
 	var index []IndexEntry
 	var logicalBlock bytes.Buffer
+	var restartOffsets []uint32
 	var recordCount int
 	var blockFirstKey string
 	var previousKey string
@@ -89,6 +90,7 @@ func CreateFromIteratorWithOptions(
 	// closure to start a new block
 	startBlock := func(firstKey string) {
 		logicalBlock.Reset()
+		restartOffsets = restartOffsets[:0]
 
 		var countPlaceholder [4]byte
 		logicalBlock.Write(countPlaceholder[:])
@@ -104,6 +106,16 @@ func CreateFromIteratorWithOptions(
 
 		// write record count at the beginning of the block
 		binary.LittleEndian.PutUint32(logicalBlock.Bytes()[0:4], uint32(recordCount))
+
+		var restart [4]byte
+		for _, offset := range restartOffsets {
+			binary.LittleEndian.PutUint32(restart[:], offset)
+			logicalBlock.Write(restart[:])
+		}
+		binary.LittleEndian.PutUint32(restart[:], uint32(opts.RestartInterval))
+		logicalBlock.Write(restart[:])
+		binary.LittleEndian.PutUint32(restart[:], uint32(len(restartOffsets)))
+		logicalBlock.Write(restart[:])
 
 		logical := logicalBlock.Bytes()
 		physical, err := encodePhysicalBlock(logical, opts.Compression, opts.MinCompressionSavingsRate)
@@ -130,6 +142,7 @@ func CreateFromIteratorWithOptions(
 		})
 
 		logicalBlock.Reset()
+		restartOffsets = restartOffsets[:0]
 		recordCount = 0
 		blockFirstKey = ""
 
@@ -176,11 +189,22 @@ func CreateFromIteratorWithOptions(
 		recSize := record.EncodedSize(rec)
 
 		// flush the block if adding this record would exceed the block size
-		if recordCount > 0 && logicalBlock.Len()+recSize > opts.BlockSize {
+		addsRestart := recordCount%opts.RestartInterval == 0
+		restartCount := len(restartOffsets)
+		if addsRestart {
+			restartCount++
+		}
+		projectedSize := logicalBlock.Len() + recSize + restartCount*4 + 8
+		if recordCount > 0 && projectedSize > opts.BlockSize {
 			if err := flushBlock(); err != nil {
 				return nil, err
 			}
 			startBlock(rec.Key)
+			addsRestart = true
+		}
+
+		if addsRestart {
+			restartOffsets = append(restartOffsets, uint32(logicalBlock.Len()))
 		}
 
 		if err := record.EncodeBinary(&logicalBlock, rec); err != nil {
@@ -281,12 +305,13 @@ func CreateFromIteratorWithOptions(
 	}
 
 	return &SSTable{
-		Path:        path,
-		SizeBytes:   uint64(fileInfo.Size()),
-		SmallestKey: smallestKey,
-		LargestKey:  largestKey,
-		index:       index,
-		filter:      filter,
+		Path:          path,
+		SizeBytes:     uint64(fileInfo.Size()),
+		SmallestKey:   smallestKey,
+		LargestKey:    largestKey,
+		formatVersion: currentFormatVersion,
+		index:         index,
+		filter:        filter,
 	}, nil
 }
 

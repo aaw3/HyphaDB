@@ -17,12 +17,13 @@ var ErrUnsortedRecords = errors.New("records are not sorted")
 var ErrRetired = errors.New("SSTable is retired")
 
 type SSTable struct {
-	ID          uint64
-	Level       uint32
-	Path        string
-	SizeBytes   uint64
-	SmallestKey string
-	LargestKey  string
+	ID            uint64
+	Level         uint32
+	Path          string
+	SizeBytes     uint64
+	SmallestKey   string
+	LargestKey    string
+	formatVersion byte
 
 	cache blockcache.Cache
 
@@ -146,8 +147,11 @@ func (s *SSTable) GetRecordAt(key string, maxSeq uint64) (record.Record, bool, e
 		if err != nil {
 			return record.Record{}, false, err
 		}
-		cursor, err := newLogicalBlockCursor(logical)
+		cursor, err := newLogicalBlockCursorForVersion(logical, s.formatVersion)
 		if err != nil {
+			return record.Record{}, false, err
+		}
+		if err := cursor.seek(key); err != nil {
 			return record.Record{}, false, err
 		}
 
@@ -283,6 +287,7 @@ func (s *SSTable) loadMetadata() error {
 
 	s.index = index
 	s.filter = filter
+	s.formatVersion = footer.formatVersion
 	s.metaLoaded = true
 	return nil
 }

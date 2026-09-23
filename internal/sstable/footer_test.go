@@ -56,6 +56,40 @@ func TestReadFooterRejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
+func TestReadFooterAcceptsLegacyVersion(t *testing.T) {
+	path := createValidFooterFile(t, 0, 0, 0, 0)
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		t.Fatalf("Stat: %v", err)
+	}
+	versionOffset := info.Size() - int64(footerSize) + 38
+	if _, err := file.WriteAt([]byte{legacyFormatVersion}, versionOffset); err != nil {
+		file.Close()
+		t.Fatalf("write legacy version: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	file, err = os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer file.Close()
+	metadata, err := readFooter(file)
+	if err != nil {
+		t.Fatalf("readFooter: %v", err)
+	}
+	if metadata.formatVersion != legacyFormatVersion {
+		t.Fatalf("format version = %d, want %d", metadata.formatVersion, legacyFormatVersion)
+	}
+}
+
 func TestReadFooterRejectsNonzeroReservedByte(t *testing.T) {
 	path := t.TempDir() + "/test_sstable_nonzero_reserved_byte.sst"
 
@@ -120,10 +154,11 @@ func TestFooterRoundTrip(t *testing.T) {
 	}
 
 	want := footerMetadata{
-		indexOffset:  100,
-		indexLength:  20,
-		filterOffset: 120,
-		filterLength: 10,
+		formatVersion: currentFormatVersion,
+		indexOffset:   100,
+		indexLength:   20,
+		filterOffset:  120,
+		filterLength:  10,
 	}
 
 	if err := writeFooter(

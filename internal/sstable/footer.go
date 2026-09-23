@@ -12,16 +12,18 @@ const (
 	maxIndexSize  = 256 << 20 // 256MB
 	maxFilterSize = 256 << 20 // 256MB
 
-	currentFormatVersion = 2
+	legacyFormatVersion  = 2
+	currentFormatVersion = 3
 )
 
 const tableMagic = "HYPSST"
 
 type footerMetadata struct {
-	indexOffset  uint64
-	indexLength  uint64
-	filterOffset uint64
-	filterLength uint64
+	formatVersion byte
+	indexOffset   uint64
+	indexLength   uint64
+	filterOffset  uint64
+	filterLength  uint64
 }
 
 func writeFooter(
@@ -88,7 +90,7 @@ func readFooter(file *os.File) (footerMetadata, error) {
 	}
 
 	version := footer[38]
-	if version != currentFormatVersion {
+	if version != legacyFormatVersion && version != currentFormatVersion {
 		return footerMetadata{}, fmt.Errorf(
 			"%w: unsupported SSTable format version: %d",
 			ErrCorruptSSTable,
@@ -190,9 +192,10 @@ func readFooter(file *os.File) (footerMetadata, error) {
 	}
 
 	return footerMetadata{
-		indexOffset:  indexOffset,
-		indexLength:  indexLength,
-		filterOffset: filterOffset,
-		filterLength: filterLength,
+		formatVersion: version,
+		indexOffset:   indexOffset,
+		indexLength:   indexLength,
+		filterOffset:  filterOffset,
+		filterLength:  filterLength,
 	}, nil
 }
